@@ -1,0 +1,5 @@
+# Per-user files created while the island runs
+settings.json
+island.log
+cache/
+lyrics/
