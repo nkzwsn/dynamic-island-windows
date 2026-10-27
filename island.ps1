@@ -9,7 +9,7 @@ try { if ((Get-Item $logFile -ErrorAction Stop).Length -gt 512KB) { Remove-Item 
 function Log($msg) { try { Add-Content -Path $logFile -Value ("{0:yyyy-MM-dd HH:mm:ss} {1}" -f (Get-Date), $msg) } catch {} }
 
 # Versi ini dibandingkan dengan file VERSION di GitHub untuk cek update
-$APP_VERSION = '1.1.1'
+$APP_VERSION = '1.1.2'
 $REPO_URL = 'https://github.com/nkzwsn/mini-island-windows'
 
 # Pengaturan yang diingat antar-restart (diatur lewat menu klik kanan)
@@ -332,6 +332,81 @@ public class IslandWave {
             g.Freeze();
             paths[i].Data = g;
         }
+    }
+}
+'@
+# Ikon aplikasi dari shell Windows (cadangan untuk aplikasi non-Store seperti Discord yang logonya tidak
+# diberikan API notifikasi), dan isi XML notifikasi dari database notifikasi Windows (untuk foto pengirim)
+Add-IslandType -Refs $WPF_REFS @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Windows;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
+public static class IslandShell {
+    [ComImport, Guid("bcc18b79-ba16-442f-80c4-8a59c30c463b"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IShellItemImageFactory { [PreserveSig] int GetImage(SIZE size, int flags, out IntPtr phbm); }
+    [StructLayout(LayoutKind.Sequential)] struct SIZE { public int cx, cy; }
+    [StructLayout(LayoutKind.Sequential)] struct BITMAP { public int bmType, bmWidth, bmHeight, bmWidthBytes; public ushort bmPlanes, bmBitsPixel; public IntPtr bmBits; }
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = false)]
+    static extern void SHCreateItemFromParsingName(string path, IntPtr pbc, [MarshalAs(UnmanagedType.LPStruct)] Guid riid, [MarshalAs(UnmanagedType.Interface)] out IShellItemImageFactory item);
+    [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr h);
+    [DllImport("gdi32.dll")] static extern int GetObject(IntPtr h, int size, ref BITMAP bm);
+
+    // Ikon (dengan transparansi) untuk "shell:AppsFolder\<AUMID>" atau path file
+    public static BitmapSource Icon(string parsingName, int size) {
+        IShellItemImageFactory f;
+        SHCreateItemFromParsingName(parsingName, IntPtr.Zero, typeof(IShellItemImageFactory).GUID, out f);
+        IntPtr hb;
+        if (f.GetImage(new SIZE { cx = size, cy = size }, 0x4, out hb) != 0 || hb == IntPtr.Zero) return null;   // 0x4 = hanya ikon
+        try {
+            var bm = new BITMAP();
+            GetObject(hb, Marshal.SizeOf(typeof(BITMAP)), ref bm);
+            if (bm.bmBits == IntPtr.Zero || bm.bmBitsPixel != 32) return null;
+            int stride = bm.bmWidthBytes, h = Math.Abs(bm.bmHeight);
+            var px = new byte[stride * h];
+            Marshal.Copy(bm.bmBits, px, 0, px.Length);
+            // Bitmap DIB tersimpan dari baris bawah ke atas
+            var rows = new byte[px.Length];
+            for (int y = 0; y < h; y++) Buffer.BlockCopy(px, y * stride, rows, (h - 1 - y) * stride, stride);
+            var bs = BitmapSource.Create(bm.bmWidth, h, 96, 96, PixelFormats.Pbgra32, null, rows, stride);
+            bs.Freeze();
+            return bs;
+        } finally { DeleteObject(hb); }
+    }
+}
+public static class IslandWpn {
+    [DllImport("winsqlite3.dll")] static extern int sqlite3_open_v2(byte[] f, out IntPtr db, int flags, IntPtr vfs);
+    [DllImport("winsqlite3.dll")] static extern int sqlite3_prepare_v2(IntPtr db, byte[] sql, int n, out IntPtr st, IntPtr tail);
+    [DllImport("winsqlite3.dll")] static extern int sqlite3_bind_int64(IntPtr st, int i, long v);
+    [DllImport("winsqlite3.dll")] static extern int sqlite3_step(IntPtr st);
+    [DllImport("winsqlite3.dll")] static extern IntPtr sqlite3_column_blob(IntPtr st, int i);
+    [DllImport("winsqlite3.dll")] static extern int sqlite3_column_bytes(IntPtr st, int i);
+    [DllImport("winsqlite3.dll")] static extern int sqlite3_finalize(IntPtr st);
+    [DllImport("winsqlite3.dll")] static extern int sqlite3_close(IntPtr db);
+    static byte[] Z(string s) { return Encoding.UTF8.GetBytes(s + "\0"); }
+
+    // XML notifikasi (toast) dengan Id yang sama seperti UserNotification.Id; null kalau tidak ada.
+    // Database dibuka hanya-baca.
+    public static string Payload(long id) {
+        string path = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData) + @"\Microsoft\Windows\Notifications\wpndatabase.db";
+        IntPtr db, st;
+        if (sqlite3_open_v2(Z(path), out db, 1, IntPtr.Zero) != 0) { sqlite3_close(db); return null; }
+        string result = null;
+        try {
+            if (sqlite3_prepare_v2(db, Z("SELECT Payload FROM Notification WHERE Id = ?1"), -1, out st, IntPtr.Zero) != 0) return null;
+            sqlite3_bind_int64(st, 1, id);
+            if (sqlite3_step(st) == 100) {
+                int n = sqlite3_column_bytes(st, 0);
+                var b = new byte[n];
+                if (n > 0) Marshal.Copy(sqlite3_column_blob(st, 0), b, 0, n);
+                result = Encoding.UTF8.GetString(b);
+            }
+            sqlite3_finalize(st);
+        } finally { sqlite3_close(db); }
+        return result;
     }
 }
 '@
@@ -747,6 +822,28 @@ function New-GlassBorder {
 $GLASS_BORDER = New-GlassBorder
 
 function New-Icon($n, $size, $radius) {
+    # Ada foto pengirim: foto bulat, ikon aplikasi kecil di pojok kanan bawahnya
+    if ($n.Photo) {
+        $g = New-Object System.Windows.Controls.Grid
+        $g.Width = $size; $g.Height = $size
+        $ph = New-Object System.Windows.Controls.Border
+        $ph.CornerRadius = New-Object System.Windows.CornerRadius($size / 2)
+        $ib = New-Object System.Windows.Media.ImageBrush($n.Photo); $ib.Stretch = 'UniformToFill'
+        $ph.Background = $ib
+        [void]$g.Children.Add($ph)
+        if ($n.Icon) {
+            $bs = [Math]::Round($size * 0.46)
+            $badge = New-Object System.Windows.Controls.Border
+            $badge.Width = $bs; $badge.Height = $bs
+            $badge.CornerRadius = New-Object System.Windows.CornerRadius($bs * 0.3)
+            $badge.BorderThickness = 1.5; $badge.BorderBrush = Brush '#F2141416'
+            $bib = New-Object System.Windows.Media.ImageBrush($n.Icon); $bib.Stretch = 'Uniform'
+            $badge.Background = $bib
+            $badge.HorizontalAlignment = 'Right'; $badge.VerticalAlignment = 'Bottom'; $badge.Margin = '0,0,-3,-3'
+            [void]$g.Children.Add($badge)
+        }
+        return $g
+    }
     $b = New-Object System.Windows.Controls.Border
     $b.Width = $size; $b.Height = $size
     $b.CornerRadius = New-Object System.Windows.CornerRadius($radius)
@@ -824,11 +921,45 @@ function Get-AppIcon($un, $aumid) {
     $bmp = $null
     try {
         $ref = $un.AppInfo.DisplayInfo.GetLogo((New-Object Windows.Foundation.Size(64, 64)))
-        # Sebagian aplikasi (mis. Dropbox) memang tidak punya logo: pakai inisial, tanpa log error
         if ($ref) { $bmp = Trim-Bitmap (Read-StreamImage $ref) }
-    } catch { Log "icon $aumid : $_" }
+    } catch {}
+    # Aplikasi non-Store (Discord, dll) sering tanpa logo di sini: ambil ikonnya dari daftar aplikasi Windows.
+    # Kalau tetap tidak ada (mis. Dropbox), pakai inisial.
+    if (-not $bmp -and $aumid) {
+        try { $s = [IslandShell]::Icon("shell:AppsFolder\$aumid", 64); if ($s) { $bmp = Trim-Bitmap $s } } catch {}
+    }
     $iconCache[$aumid] = $bmp
     $bmp
+}
+
+# Foto pengirim (avatar di notifikasi Discord, WhatsApp, Chrome, dll): gambar "appLogoOverride" di XML
+# notifikasinya. Berkas lokal atau alamat web; $null kalau tidak ada.
+function Get-ToastPhoto($id) {
+    $xml = $null
+    try { $xml = [IslandWpn]::Payload([long]$id) } catch { Log "toast xml: $_" }
+    if (-not $xml) { return $null }
+    try {
+        $doc = New-Object System.Xml.XmlDocument
+        $doc.LoadXml($xml)
+        $img = @($doc.SelectNodes('//image')) | Where-Object { $_.GetAttribute('placement') -eq 'appLogoOverride' } | Select-Object -First 1
+        if (-not $img) { return $null }
+        $src = $img.GetAttribute('src')
+        $bytes = $null
+        if ($src -match '^https?://') {
+            # Ditunggu sebentar saja supaya island tidak tersendat kalau jaringan lambat
+            $t = $http.GetByteArrayAsync($src)
+            if ($t.Wait(1500)) { $bytes = $t.Result }
+        } else {
+            $path = if ($src -match '^file:') { ([uri]$src).LocalPath } else { $src }
+            if ($path -and (Test-Path -LiteralPath $path)) { $bytes = [IO.File]::ReadAllBytes($path) }
+        }
+        if (-not $bytes) { return $null }
+        $bi = New-Object System.Windows.Media.Imaging.BitmapImage
+        $bi.BeginInit(); $bi.CacheOption = 'OnLoad'; $bi.DecodePixelWidth = 96
+        $bi.StreamSource = New-Object System.IO.MemoryStream(, $bytes)
+        $bi.EndInit(); $bi.Freeze()
+        $bi
+    } catch { Log "toast photo: $_"; $null }
 }
 
 function Convert-Notif($un) {
@@ -850,6 +981,7 @@ function Convert-Notif($un) {
         Body   = $body
         Time   = $un.CreationTime.LocalDateTime
         Icon   = $icon
+        Photo  = (Get-ToastPhoto $un.Id)
         Accent = (Get-Accent $icon $(if ($aumid) { $aumid } else { $app }))
     }
 }

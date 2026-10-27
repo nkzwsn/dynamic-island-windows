@@ -5,8 +5,9 @@ and what's playing, instead of the toasts in the bottom-right corner.
 
 ## Features
 
-- **Notifications** pop up from the top center, colored with the app's icon color. Hover to read the
-  full message, click to open the app (the notification is then cleared), swipe right to dismiss.
+- **Notifications** pop up from the top center, colored with the app's icon color, with the sender's
+  photo when the app includes one (Discord, WhatsApp, ...). Hover to read the full message, click to
+  open the app (the notification is then cleared), swipe right to dismiss.
 - **Notification list**: move the mouse to the thin line at the top center of the screen. Delete one by
   one (x or swipe right) or clear all.
 - **WeChat** (which doesn't use Windows notifications) is detected from its flashing taskbar button.
