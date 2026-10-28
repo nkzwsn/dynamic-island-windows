@@ -9,7 +9,7 @@ try { if ((Get-Item $logFile -ErrorAction Stop).Length -gt 512KB) { Remove-Item 
 function Log($msg) { try { Add-Content -Path $logFile -Value ("{0:yyyy-MM-dd HH:mm:ss} {1}" -f (Get-Date), $msg) } catch {} }
 
 # Versi ini dibandingkan dengan file VERSION di GitHub untuk cek update
-$APP_VERSION = '1.1.4'
+$APP_VERSION = '1.2.0'
 $REPO_URL = 'https://github.com/nkzwsn/mini-island-windows'
 
 # Pengaturan yang diingat antar-restart (diatur lewat menu klik kanan)
@@ -18,8 +18,8 @@ $settingsFile = Join-Path $here 'settings.json'
 # sedikit mendahului suara yang terdengar (buffer audio, headset Bluetooth), jadi bawaannya sedikit ditunda.
 # Monitor: nama perangkat layar (kosong = layar utama). Language: 'id' / 'en'.
 $script:settings = [PSCustomObject]@{
-    Lyrics = $true; Romaji = $true; LyricDelay = 0.15; Language = ''; Monitor = ''
-    VolumeOsd = $true; Charging = $true; MicCam = $true; CheckUpdates = $true; SkipVersion = ''
+    Lyrics = $true; Romaji = $true; Furigana = $true; LyricDelay = 0.15; Language = ''; Monitor = ''
+    VolumeOsd = $true; Charging = $true; MicCam = $true; Headset = $true; Glow = $true; CheckUpdates = $true; SkipVersion = ''; NotifiedVersion = ''
 }
 try {
     if (Test-Path $settingsFile) {
@@ -475,6 +475,7 @@ public class VolumeWatcher : IAudioEndpointVolumeCallback {
     public float Level; public bool Muted; public bool Own; public string Error;
     readonly Dispatcher ui = Dispatcher.CurrentDispatcher;
     IAudioEndpointVolume vol; IntPtr cbPtr = IntPtr.Zero; string deviceId;
+    public string DeviceId { get { return deviceId; } }
     public VolumeWatcher() { Check(); }
     // Dipanggil berkala: daftar ulang kalau perangkat output default berganti
     public void Check() {
@@ -655,6 +656,15 @@ $xaml = @'
     </StackPanel>
     <!-- Island; di kanannya gelembung kecil untuk timer saat island sedang dipakai lagu -->
     <StackPanel x:Name="IslandRow" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,8,0,0">
+    <Grid VerticalAlignment="Top">
+    <!-- Cahaya samar warna album di belakang island selama lagu diputar (diam, tidak berkedip). Ukuran, sudut,
+         geseran dan opacity-nya mengikuti island, jadi ikut menghilang saat island memudar. -->
+    <Border x:Name="Glow" VerticalAlignment="Top" IsHitTestVisible="False" Background="#00000000"
+            Width="{Binding ActualWidth, ElementName=Island}" Height="{Binding ActualHeight, ElementName=Island}"
+            CornerRadius="{Binding CornerRadius, ElementName=Island}" Opacity="{Binding Opacity, ElementName=Island}"
+            RenderTransform="{Binding RenderTransform, ElementName=Island}">
+      <Border.Effect><BlurEffect Radius="16" RenderingBias="Performance"/></Border.Effect>
+    </Border>
     <Border x:Name="Island" Background="Black" CornerRadius="15" Width="120" Height="30" Opacity="0" IsHitTestVisible="False"
             BorderThickness="1" BorderBrush="#40FFFFFF" VerticalAlignment="Top" ClipToBounds="True">
       <Grid x:Name="IslandContent">
@@ -680,6 +690,7 @@ $xaml = @'
         <Grid x:Name="ActivityView" Opacity="0" IsHitTestVisible="False"/>
       </Grid>
     </Border>
+    </Grid>
     <Border x:Name="Bubble" Height="24" Width="0" Opacity="0" CornerRadius="12" Margin="0" VerticalAlignment="Top"
             Background="#E6000000" BorderThickness="1" BorderBrush="#40FFFFFF" IsHitTestVisible="False" ClipToBounds="True">
       <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
@@ -696,6 +707,7 @@ $island = $window.FindName('Island')
 $hotZone = $window.FindName('HotZone')
 $islandContent = $window.FindName('IslandContent')
 $handle = $window.FindName('Handle')
+$glow = $window.FindName('Glow'); $glow.Background = New-Object System.Windows.Media.SolidColorBrush([System.Windows.Media.Colors]::Transparent)
 $bubble = $window.FindName('Bubble'); $bubbleText = $window.FindName('BubbleText'); $bubbleGlyph = $window.FindName('BubbleGlyph')
 $sensorDots = $window.FindName('SensorDots'); $micDot = $window.FindName('MicDot'); $camDot = $window.FindName('CamDot')
 $views = @{}
@@ -816,7 +828,14 @@ function Set-Theme($c) {
     }
     $island.Background = $script:themeBrush
     $island.BorderBrush = $GLASS_BORDER
+    # Cahaya warna album hanya selama lagu diputar dan island sedang menampilkan lagunya
+    $on = $script:settings.Glow -and $script:media -and $script:media.Playing -and $c -eq $script:media.Accent
+    $ga = New-Object System.Windows.Media.Animation.ColorAnimation((Rgb $c.R $c.G $c.B $(if ($on) { $GLOW_ALPHA } else { 0 })), (New-Object System.Windows.Duration (Ms 650)))
+    [System.Windows.Media.Animation.Timeline]::SetDesiredFrameRate($ga, $ANIM_FPS)
+    $glow.Background.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty, $ga)
 }
+# Kekuatan cahaya warna album (0-255): sengaja samar supaya tidak mengganggu
+$GLOW_ALPHA = 60
 
 # Garis tepi gaya kaca: pantulan terang di atas, menipis ke tengah, sedikit memantul lagi di dasar
 function New-GlassBorder {
@@ -1008,7 +1027,7 @@ function Poll {
         }
         foreach ($k in @($notifCache.Keys)) { if (-not $present.ContainsKey($k)) { $notifCache.Remove($k) } }
         foreach ($n in ($fresh | Sort-Object Time)) { Enqueue-Notif $n }
-        $script:recent = @($notifCache.Values | Sort-Object Time -Descending)
+        Merge-Recent
     } catch { Log "poll: $_" }
     try { Poll-Flashes } catch { Log "flash: $_" }
     try { Poll-Media } catch { Log "media: $_" }
@@ -1032,7 +1051,7 @@ function Enqueue-Notif($n) {
 function Next-Queued {
     while ($queue.Count -gt 0) {
         $n = $queue.Dequeue()
-        if ($n.Exe -or $notifCache.ContainsKey($n.Id)) { return $n }
+        if ($n.Exe -or $n.Kind -or $notifCache.ContainsKey($n.Id)) { return $n }
     }
     $null
 }
@@ -1868,6 +1887,7 @@ function Show-Media([switch]$Refresh) {
 }
 
 function Open-Notif($n) {
+    if ($n.Kind -eq 'update') { Start-SelfUpdate; return }
     if ($n.Exe) { try { Start-Process $n.Exe } catch { Log "open exe: $_" } }
     else {
         Open-App $n.Aumid
@@ -1891,6 +1911,7 @@ function Open-App($aumid) {
 
 # ---------- Mode ----------
 function Go-Idle {
+    $script:listPinned = $false
     $script:mode = 'idle'
     $dismissTimer.Stop()
     # Konfirmasi "Hapus semua" tidak boleh terbawa ke daftar berikutnya
@@ -2058,7 +2079,8 @@ $miniTimer.Add_Tick({
         $q = $island.PointFromScreen((New-Object System.Windows.Point($p[0], $p[1])))
         # Gelembung timer di kanan island ikut dihitung
         $right = $island.ActualWidth + $bubble.ActualWidth + $bubble.Margin.Left
-        $near = $q.X -ge -14 -and $q.X -le ($right + 14) -and $q.Y -ge -1 -and $q.Y -le ($island.ActualHeight + 10)
+        # Jarak ikut cahaya warna album di sekeliling island (bagian itu juga menghalangi klik)
+        $near = $q.X -ge -22 -and $q.X -le ($right + 22) -and $q.Y -ge -1 -and $q.Y -le ($island.ActualHeight + 20)
     } catch {}
     if ($near -ne $script:miniFaded) {
         $script:miniFaded = $near
@@ -2425,7 +2447,7 @@ function Get-LyricParts($text) {
 
 # Satu lapis teks lirik: tiap potongan = furigana (kalau ada) di atas teks dasarnya, romaji di bawah baris
 function New-LyricLayer($parts, $brush) {
-    $hasRuby = $parts.HasRuby
+    $hasRuby = $parts.HasRuby -and $script:settings.Furigana
     $outer = New-Object System.Windows.Controls.StackPanel
     $sp = New-Object System.Windows.Controls.StackPanel
     $sp.Orientation = 'Horizontal'; $sp.HorizontalAlignment = 'Center'
@@ -2707,7 +2729,6 @@ function Process-Queue {
     if ($pa) {
         $script:pendingActivity = $null
         switch ($pa.Kind) {
-            'update' { Show-UpdateAvailable $pa.Arg }
             'info' { Show-Info $pa.Arg }
         }
         return
@@ -2760,6 +2781,7 @@ function Show-Notif($n) {
 }
 
 function Remove-Notif($id) {
+    if (Remove-IslandItem $id) { return }
     try { $listener.RemoveNotification([uint32]$id) } catch { Log "remove: $_" }
     $notifCache.Remove($id)
     $script:recent = @($script:recent | Where-Object { $_.Id -ne $id })
@@ -2771,6 +2793,7 @@ function Clear-AllNotifs {
         try { $listener.RemoveNotification([uint32]$id) } catch { Log "clear $id : $_" }
     }
     $notifCache.Clear()
+    foreach ($it in @($script:islandItems)) { [void](Remove-IslandItem $it.Id) }
     $script:recent = @()
 }
 
@@ -2900,39 +2923,348 @@ $script:swiped = $false
 $script:hwheelSum = 0
 $script:lastPageSwitch = [DateTime]::MinValue
 
+# Halaman yang tersedia, urut kiri ke kanan: notifikasi (kalau ada, atau kalau tidak ada lagu), musik,
+# dan lirik penuh (kalau lagunya punya lirik)
+function Get-ListPages {
+    $p = @()
+    if (@($script:recent).Count -gt 0 -or -not $script:media) { $p += 'notif' }
+    if ($script:media) {
+        $p += 'music'
+        if (Get-Lyrics) { $p += 'lyrics' }
+    }
+    , $p
+}
+
 function New-PageDots {
     $sp = New-Object System.Windows.Controls.StackPanel
     $sp.Orientation = 'Horizontal'; $sp.HorizontalAlignment = 'Center'; $sp.Margin = '0,8,0,0'
-    foreach ($p in 'notif', 'music') {
+    foreach ($p in (Get-ListPages)) {
         $d = New-Object System.Windows.Shapes.Ellipse
         $on = $p -eq $script:listPage
         $d.Width = $(if ($on) { 7 } else { 6 }); $d.Height = $d.Width; $d.Margin = '4,0'
         $d.Fill = Brush $(if ($on) { '#FFFFFFFF' } else { '#55FFFFFF' })
-        $d.Cursor = 'Hand'; $d.Tag = $p; $d.ToolTip = $(if ($p -eq 'notif') { T 'Notifikasi' 'Notifications' } else { T 'Musik' 'Music' })
+        $d.Cursor = 'Hand'; $d.Tag = $p
+        $d.ToolTip = switch ($p) { 'notif' { T 'Notifikasi' 'Notifications' } 'music' { T 'Musik' 'Music' } default { T 'Lirik' 'Lyrics' } }
         $d.Add_MouseLeftButtonUp({ param($s, $e) $e.Handled = $true; Switch-ListPage $s.Tag })
         [void]$sp.Children.Add($d)
     }
     $sp
 }
 
-# Pindah halaman dengan animasi geser; $target kosong = pindah ke halaman satunya
+# Pindah halaman dengan animasi geser. $target: nama halaman, 'next' / 'prev', atau kosong (berikutnya, memutar)
 function Switch-ListPage($target) {
-    if ($script:mode -ne 'list' -or -not $script:media -or $script:deleting -or @($script:recent).Count -eq 0) { return }
-    if (-not $target) { $target = if ($script:listPage -eq 'notif') { 'music' } else { 'notif' } }
-    if ($target -eq $script:listPage) { return }
+    if ($script:mode -ne 'list' -or $script:deleting) { return }
+    $pages = Get-ListPages
+    if ($pages.Count -lt 2) { return }
+    $i = [array]::IndexOf($pages, $script:listPage)
+    if ($target -eq 'next') { $target = $pages[[Math]::Min($pages.Count - 1, $i + 1)] }
+    elseif ($target -eq 'prev') { $target = $pages[[Math]::Max(0, $i - 1)] }
+    elseif (-not $target) { $target = $pages[($i + 1) % $pages.Count] }
+    if ($target -eq $script:listPage -or $pages -notcontains $target) { return }
     $script:lastPageSwitch = Get-Date
     $script:listPage = $target
     Show-List -Refresh
-    Slide-ListIn $target
+    Slide-ListIn ([array]::IndexOf($pages, $target) -gt $i)
 }
 
-# Isi daftar masuk dengan geser + memudar (musik dari kanan, notifikasi dari kiri)
-function Slide-ListIn($page) {
-    $from = if ($page -eq 'music') { 60 } else { -60 }
+# Isi daftar masuk dengan geser + memudar (halaman di kanan masuk dari kanan, dan sebaliknya)
+function Slide-ListIn($fromRight) {
+    $from = if ($fromRight) { 60 } else { -60 }
     $tt = New-Object System.Windows.Media.TranslateTransform
     $listPanel.RenderTransform = $tt
     Animate $tt ([System.Windows.Media.TranslateTransform]::XProperty) 0 300 0 $from
     Animate $listPanel ([System.Windows.UIElement]::OpacityProperty) 1 260 0 0
+}
+
+# ---------- Halaman lirik penuh ----------
+# Seluruh lirik lagu bergulir sendiri: baris yang sedang dinyanyikan terang di sepertiga atas kartu,
+# baris lain redup, tepi atas & bawah memudar. Klik satu baris = lompat ke bagian lagu itu.
+# Tombol di pojok kanan atas: pin (island tetap terbuka walau kursor pergi), dan untuk lirik Jepang
+# furigana & romaji. Furigana/romaji dihitung bertahap mulai dari baris yang sedang dinyanyikan,
+# jadi halaman langsung tampil tanpa menunggu semua baris.
+$LYRICS_PAGE_H = 196
+$GLYPH_PIN = [string][char]0xE718; $GLYPH_PINNED = [string][char]0xE840
+$script:lyricsPage = $null
+$script:listPinned = $false
+$DIM_LINE = Rgb 255 255 255 92
+
+# Isi satu baris: potongan teks (furigana di atas kanji kalau dinyalakan) yang bisa turun baris, romaji di bawahnya
+function Set-PageLine($block, $parts, [switch]$Fade) {
+    $brush = $block.Tag.Brush
+    $block.Tag.Parts = $parts
+    $block.Children.Clear()
+    $extras = New-Object System.Collections.Generic.List[object]
+    $wp = New-Object System.Windows.Controls.WrapPanel
+    [void]$block.Children.Add($wp)
+    $ruby = $parts -and $parts.HasRuby -and $script:settings.Furigana
+    $segs = if ($parts) { $parts.Segs } else { @([PSCustomObject]@{ Text = $block.Tag.Line.Text; Ruby = $null }) }
+    foreach ($sg in $segs) {
+        $col = New-Object System.Windows.Controls.StackPanel
+        $col.VerticalAlignment = 'Bottom'
+        if ($ruby) {
+            $rt = New-Object System.Windows.Controls.TextBlock
+            $rt.Text = if ($sg.Ruby) { $sg.Ruby } else { ' ' }
+            $rt.FontSize = 9; $rt.LineStackingStrategy = 'BlockLineHeight'; $rt.LineHeight = 10; $rt.Height = 10
+            $rt.HorizontalAlignment = 'Center'; $rt.Foreground = $brush
+            [void]$col.Children.Add($rt)
+            if ($sg.Ruby) { $extras.Add($rt) }
+        }
+        $bt = New-Object System.Windows.Controls.TextBlock
+        $bt.Text = $sg.Text; $bt.FontSize = 14.5; $bt.FontWeight = 'SemiBold'; $bt.Foreground = $brush
+        $bt.TextWrapping = 'Wrap'; $bt.MaxWidth = $WIDE_W - 54
+        [void]$col.Children.Add($bt)
+        [void]$wp.Children.Add($col)
+    }
+    if ($parts -and $parts.Romaji -and $script:settings.Romaji) {
+        $ro = New-Object System.Windows.Controls.TextBlock
+        $ro.Text = $parts.Romaji; $ro.FontSize = 10.5; $ro.Foreground = $brush; $ro.Opacity = 0.8
+        $ro.TextWrapping = 'Wrap'; $ro.Margin = '0,1,0,0'
+        [void]$block.Children.Add($ro)
+        $extras.Add($ro)
+    }
+    # Furigana/romaji yang baru muncul memudar masuk
+    $op = [System.Windows.UIElement]::OpacityProperty
+    if ($Fade) { foreach ($x in $extras) { $to = [double]$x.Opacity; $x.Opacity = 0; Animate60 $x $op 0.0 $to 260 } }
+    $block.Tag.Extras = $extras
+}
+
+# Tombol bulat kecil di pojok kartu lirik; $on = menyala
+function New-PageToggle($content, $tip, $on, [switch]$Glyph) {
+    $b = New-Object System.Windows.Controls.Border
+    $b.Width = 24; $b.Height = 24; $b.CornerRadius = New-Object System.Windows.CornerRadius(12)
+    $b.Margin = '4,0,0,0'; $b.Cursor = 'Hand'; $b.ToolTip = $tip
+    $b.Resources['RestHex'] = if ($on) { '#55FFFFFF' } else { '#26FFFFFF' }
+    $b.Background = Brush $b.Resources['RestHex']
+    $t = New-Object System.Windows.Controls.TextBlock
+    $t.Text = $content; $t.HorizontalAlignment = 'Center'; $t.VerticalAlignment = 'Center'
+    $t.Foreground = Brush $(if ($on) { '#FFFFFFFF' } else { '#99FFFFFF' })
+    if ($Glyph) { $t.FontFamily = 'Segoe Fluent Icons, Segoe MDL2 Assets'; $t.FontSize = 11 } else { $t.FontSize = 10.5; $t.FontWeight = 'SemiBold' }
+    $b.Child = $t
+    $b.Add_MouseEnter({ param($s, $e) $s.Background = Brush '#66FFFFFF' })
+    $b.Add_MouseLeave({ param($s, $e) $s.Background = Brush $s.Resources['RestHex'] })
+    $b
+}
+
+function New-LyricsPage {
+    # (Get-Lyrics) dalam kurung: hasilnya array utuh, baru dipecah per baris oleh pipa
+    $lines = @((Get-Lyrics) | Where-Object { $_.Text })
+    $card = New-Object System.Windows.Controls.Border
+    $card.Height = $LYRICS_PAGE_H; $card.ClipToBounds = $true
+    $card.CornerRadius = New-Object System.Windows.CornerRadius(14)
+    $card.Background = Row-Brush $script:media.Accent $true
+    $layers = New-Object System.Windows.Controls.Grid
+    $card.Child = $layers
+    # Canvas: daftar baris boleh jauh lebih tinggi dari kartu tanpa dipotong layout (Grid memotong anak yang
+    # lebih besar dari tempatnya, sehingga baris bawah tidak pernah tampil saat digulir). Masker pudar dipasang
+    # di pembungkusnya: masker pada elemen yang isinya bergeser ikut bergeser bersama isinya.
+    $hostG = New-Object System.Windows.Controls.Canvas
+    $hostG.ClipToBounds = $true
+    $fade = New-Object System.Windows.Controls.Grid
+    [void]$fade.Children.Add($hostG)
+    [void]$layers.Children.Add($fade)
+    $sp = New-Object System.Windows.Controls.StackPanel
+    $sp.Width = $WIDE_W - 18
+    $tt = New-Object System.Windows.Media.TranslateTransform
+    $sp.RenderTransform = $tt
+    $estimated = $lines.Count -and $lines[0].Estimated
+    $japanese = @($lines | Where-Object { $_.Text -match $JAPANESE }).Count -gt 0
+    $blocks = New-Object System.Collections.Generic.List[object]
+    foreach ($l in $lines) {
+        $blk = New-Object System.Windows.Controls.StackPanel
+        $blk.Margin = '18,5,18,5'; $blk.Background = Brush '#01000000'
+        $blk.Tag = [PSCustomObject]@{ Line = $l; Brush = (New-Object System.Windows.Media.SolidColorBrush($DIM_LINE)); Parts = $null; Extras = $null }
+        # Furigana/romaji yang sudah pernah dihitung (mis. oleh mini island) langsung dipakai
+        $ready = if ($japanese -and $l.PSObject.Properties['Parts'] -and $l.PartsVer -eq $script:partsVer) { $l.Parts } else { $null }
+        Set-PageLine $blk $ready
+        # Lirik biasa hanya taksiran waktu: tidak bisa dipakai untuk lompat
+        if (-not $estimated) {
+            $blk.Cursor = 'Hand'
+            $blk.Add_MouseLeftButtonUp({
+                param($s, $e)
+                $e.Handled = $true
+                Media-Seek ($s.Tag.Line.T + (Get-LyricDelay) + 0.05)
+                if ($script:lyricsPage) { $script:lyricsPage.Cur = -2 }
+                Update-LyricsPage
+            })
+        }
+        [void]$sp.Children.Add($blk)
+        $blocks.Add($blk)
+    }
+    [void]$hostG.Children.Add($sp)
+    # Tepi atas & bawah memudar (ukuran tetap setinggi kartu; daftar baris jauh lebih panjang dari kartu)
+    $mask = New-Object System.Windows.Media.LinearGradientBrush
+    $mask.MappingMode = 'Absolute'; $mask.StartPoint = '0,0'; $mask.EndPoint = "0,$LYRICS_PAGE_H"
+    foreach ($st in @(@(0, 0.0), @(255, 0.2), @(255, 0.78), @(0, 1.0))) {
+        $mask.GradientStops.Add((New-Object System.Windows.Media.GradientStop((Rgb 0 0 0 $st[0]), $st[1])))
+    }
+    $fade.OpacityMask = $mask
+
+    # Tombol pojok kanan atas
+    $bar = New-Object System.Windows.Controls.StackPanel
+    $bar.Orientation = 'Horizontal'; $bar.HorizontalAlignment = 'Right'; $bar.VerticalAlignment = 'Top'; $bar.Margin = '0,8,8,0'
+    $script:furiButton = $null; $script:romajiButton = $null
+    if ($japanese) {
+        $fb = New-PageToggle ([string][char]0x3042) (T 'Furigana' 'Furigana') $script:settings.Furigana
+        $fb.Add_MouseLeftButtonUp({ param($s, $e) $e.Handled = $true; Toggle-LyricOption 'Furigana' })
+        [void]$bar.Children.Add($fb); $script:furiButton = $fb
+        $rb = New-PageToggle 'Ro' (T 'Romaji' 'Romaji') $script:settings.Romaji
+        $rb.Add_MouseLeftButtonUp({ param($s, $e) $e.Handled = $true; Toggle-LyricOption 'Romaji' })
+        [void]$bar.Children.Add($rb); $script:romajiButton = $rb
+    }
+    $pinTip = if ($script:listPinned) { T 'Lepas pin (island menutup lagi saat kursor pergi)' 'Unpin (closes again when the mouse leaves)' } else { T 'Pin: island tetap terbuka' 'Pin: keep the island open' }
+    $pb = New-PageToggle $(if ($script:listPinned) { $GLYPH_PINNED } else { $GLYPH_PIN }) $pinTip $script:listPinned -Glyph
+    $pb.Add_MouseLeftButtonUp({ param($s, $e) $e.Handled = $true; Toggle-ListPin })
+    [void]$bar.Children.Add($pb)
+    $script:pinButton = $pb
+    [void]$layers.Children.Add($bar)
+
+    $script:lyricsPage = @{ Lines = $lines; Blocks = $blocks; Tops = $null; Shift = $tt; Cur = -2; Root = $card; Panel = $sp
+        Pending = $(if ($japanese) { New-Object System.Collections.Generic.List[int] } else { $null }) }
+    Measure-LyricsPage
+    Update-LyricsPage -Instant
+    $lyricsPageTimer.Start()
+    if ($japanese) { Queue-PageParts; $pagePartsTimer.Start() }
+    $card
+}
+
+# Posisi atas tiap baris (dihitung ulang setiap tinggi baris berubah karena furigana/romaji)
+function Measure-LyricsPage {
+    $lp = $script:lyricsPage
+    $lp.Panel.Measure((New-Object System.Windows.Size(($WIDE_W - 18), [double]::PositiveInfinity)))
+    $tops = New-Object System.Collections.Generic.List[double]
+    $y = 0.0
+    foreach ($b in $lp.Blocks) { $tops.Add($y); $y += $b.DesiredSize.Height }
+    $lp.Tops = $tops
+}
+
+# Urutan baris yang furigana/romaji-nya dihitung: dari baris sekarang ke bawah, lalu ke atas
+function Queue-PageParts {
+    $lp = $script:lyricsPage
+    $pos = (Get-SongPos) - (Get-LyricDelay)
+    $c = [Math]::Max(0, (Find-LyricLine $lp.Lines $pos))
+    $lp.Pending.Clear()
+    for ($i = $c; $i -lt $lp.Blocks.Count; $i++) { $lp.Pending.Add($i) }
+    for ($i = $c - 1; $i -ge 0; $i--) { $lp.Pending.Add($i) }
+}
+
+$pagePartsTimer = New-Object System.Windows.Threading.DispatcherTimer([System.Windows.Threading.DispatcherPriority]::Background)
+$pagePartsTimer.Interval = Ms 15
+$pagePartsTimer.Add_Tick({
+    $lp = $script:lyricsPage
+    if (-not $lp -or -not $lp.Pending -or $lp.Pending.Count -eq 0 -or $script:mode -ne 'list' -or $script:listPage -ne 'lyrics') { $pagePartsTimer.Stop(); return }
+    # Beberapa baris per tick (masing-masing beberapa ms), lalu posisi digeser supaya baris aktif tidak melompat
+    for ($n = 0; $n -lt 3 -and $lp.Pending.Count; $n++) {
+        $i = $lp.Pending[0]; $lp.Pending.RemoveAt(0)
+        $blk = $lp.Blocks[$i]
+        if ($blk.Tag.Line.Text -match $JAPANESE) { Set-PageLine $blk (Get-LineParts $blk.Tag.Line) -Fade }
+    }
+    Settle-LyricsPage
+})
+
+# Tinggi baris berubah (furigana/romaji): ukur ulang, lalu geser halus supaya baris aktif kembali ke tempatnya
+function Settle-LyricsPage {
+    $lp = $script:lyricsPage
+    if (-not $lp) { return }
+    Measure-LyricsPage
+    $top = if ($lp.Cur -ge 0) { $lp.Tops[$lp.Cur] } else { 0.0 }
+    $target = [Math]::Min(0.0, $LYRICS_PAGE_H * 0.36 - $top - 12)
+    Animate60 $lp.Shift ([System.Windows.Media.TranslateTransform]::YProperty) $lp.Shift.Y $target 380
+}
+
+function Update-LyricsPage([switch]$Instant) {
+    $lp = $script:lyricsPage
+    if (-not $lp -or $script:mode -ne 'list' -or $script:listPage -ne 'lyrics' -or -not $script:media) { $lyricsPageTimer.Stop(); return }
+    if ($lp.Lines.Count -eq 0) { return }
+    $pos = (Get-SongPos) - (Get-LyricDelay)
+    $idx = Find-LyricLine $lp.Lines $pos
+    if ($idx -eq $lp.Cur) { return }
+    $ca = [System.Windows.Media.SolidColorBrush]::ColorProperty
+    for ($i = 0; $i -lt $lp.Blocks.Count; $i++) {
+        $want = if ($i -eq $idx) { Rgb 255 255 255 255 } else { $DIM_LINE }
+        $br = $lp.Blocks[$i].Tag.Brush
+        if ($br.Color -ne $want -or $i -eq $lp.Cur -or $i -eq $idx) {
+            if ($Instant) { $br.BeginAnimation($ca, $null); $br.Color = $want }
+            else {
+                $cAnim = New-Object System.Windows.Media.Animation.ColorAnimation($want, (New-Object System.Windows.Duration (Ms 300)))
+                [System.Windows.Media.Animation.Timeline]::SetDesiredFrameRate($cAnim, $ANIM_FPS)
+                $br.BeginAnimation($ca, $cAnim)
+            }
+        }
+    }
+    $lp.Cur = $idx
+    # Baris aktif di sepertiga atas; sebelum lirik mulai, baris pertama
+    $top = if ($idx -ge 0) { $lp.Tops[$idx] } else { 0.0 }
+    $target = [Math]::Min(0.0, $LYRICS_PAGE_H * 0.36 - $top - 12)
+    $yp = [System.Windows.Media.TranslateTransform]::YProperty
+    if ($Instant) { $lp.Shift.BeginAnimation($yp, $null); $lp.Shift.Y = $target }
+    else { Animate60 $lp.Shift $yp $lp.Shift.Y $target 520 }
+}
+
+# Baris aktif dicek selama halaman lirik terbuka
+$lyricsPageTimer = New-Object System.Windows.Threading.DispatcherTimer
+$lyricsPageTimer.Interval = Ms 120
+$lyricsPageTimer.Add_Tick({ Update-LyricsPage })
+
+# Furigana / romaji nyala-mati (berlaku juga untuk mini island)
+# Di halaman lirik tidak dibangun ulang: yang dimatikan memudar keluar dulu, yang dinyalakan memudar masuk,
+# baris-baris bergeser halus ke posisi barunya.
+function Toggle-LyricOption($name) {
+    $on = -not $script:settings.$name
+    $script:settings.$name = $on
+    Save-Settings
+    # Romaji dihitung bersama furigana; bacaan yang tersimpan tanpa romaji harus dihitung ulang
+    if ($name -eq 'Romaji' -and $on) { $script:partsVer++ }
+    $script:lyricIdx = -2
+    $lp = $script:lyricsPage
+    if (-not ($lp -and $script:mode -eq 'list' -and $script:listPage -eq 'lyrics')) { if ($script:mode -eq 'list') { Show-List -Refresh }; return }
+    Update-PageToggles
+    if ($name -eq 'Romaji' -and $on) {
+        # Romaji muncul bertahap mulai dari baris sekarang (perlu dihitung)
+        Queue-PageParts; $pagePartsTimer.Start()
+        return
+    }
+    if ($on) {
+        foreach ($blk in $lp.Blocks) { if ($blk.Tag.Parts) { Set-PageLine $blk $blk.Tag.Parts -Fade } }
+        Settle-LyricsPage
+    } else {
+        $op = [System.Windows.UIElement]::OpacityProperty
+        foreach ($blk in $lp.Blocks) { $ex = $blk.Tag.Extras; if ($ex) { foreach ($x in $ex) { Animate60 $x $op ([double]$x.Opacity) 0.0 170 } } }
+        $pageReflowTimer.Stop(); $pageReflowTimer.Start()
+    }
+}
+# Setelah yang dimatikan selesai memudar: susun ulang baris lalu geser halus
+$pageReflowTimer = New-Object System.Windows.Threading.DispatcherTimer
+$pageReflowTimer.Interval = Ms 180
+$pageReflowTimer.Add_Tick({
+    $pageReflowTimer.Stop()
+    $lp = $script:lyricsPage
+    if (-not $lp) { return }
+    foreach ($blk in $lp.Blocks) { if ($blk.Tag.Parts) { Set-PageLine $blk $blk.Tag.Parts } }
+    Settle-LyricsPage
+})
+
+# Tampilan tombol pojok halaman lirik mengikuti pengaturan (tanpa membangun ulang halaman)
+function Set-PageToggleLook($b, $on, $content) {
+    if (-not $b) { return }
+    $b.Resources['RestHex'] = if ($on) { '#55FFFFFF' } else { '#26FFFFFF' }
+    if (-not $b.IsMouseOver) { $b.Background = Brush $b.Resources['RestHex'] }
+    $b.Child.Foreground = Brush $(if ($on) { '#FFFFFFFF' } else { '#99FFFFFF' })
+    if ($content) { $b.Child.Text = $content }
+}
+function Update-PageToggles {
+    Set-PageToggleLook $script:furiButton $script:settings.Furigana
+    Set-PageToggleLook $script:romajiButton $script:settings.Romaji
+    Set-PageToggleLook $script:pinButton $script:listPinned $(if ($script:listPinned) { $GLYPH_PINNED } else { $GLYPH_PIN })
+    if ($script:pinButton) {
+        $script:pinButton.ToolTip = if ($script:listPinned) { T 'Lepas pin (island menutup lagi saat kursor pergi)' 'Unpin (closes again when the mouse leaves)' } else { T 'Pin: island tetap terbuka' 'Pin: keep the island open' }
+    }
+}
+
+# Pin: daftar tidak menutup sendiri saat kursor pergi (dilepas lagi lewat tombol yang sama)
+function Toggle-ListPin {
+    $script:listPinned = -not $script:listPinned
+    Update-PageToggles
+    if (-not $script:listPinned -and -not $script:hovering -and -not $script:overHot) { $closeTimer.Start() }
 }
 
 function Show-List([switch]$Refresh) {
@@ -2941,13 +3273,13 @@ function Show-List([switch]$Refresh) {
     $listPanel.Children.Clear()
     $items = @($script:recent | Select-Object -First $MAX_ITEMS)
     Set-Theme (Rgb 110 110 118)
-    # Dua halaman: notifikasi (prioritas kalau ada) dan musik. Tanpa notifikasi, halaman notifikasi
-    # tidak ditampilkan sama sekali: langsung player musik (juga saat notifikasi terakhir dihapus).
-    $hasNotif = @($script:recent).Count -gt 0
+    # Halaman: notifikasi (prioritas kalau ada), musik, lirik. Tanpa notifikasi, halaman notifikasi tidak
+    # ditampilkan sama sekali: langsung player musik (juga saat notifikasi terakhir dihapus).
+    $pages = Get-ListPages
     $prevPage = $script:listPage
-    if (-not $script:media) { $script:listPage = 'notif' }
-    elseif (-not $hasNotif) { $script:listPage = 'music' }
-    elseif (-not $Refresh) { $script:listPage = 'notif' }
+    if (-not $Refresh) { $script:listPage = $pages[0] }
+    elseif ($pages -notcontains $script:listPage) { $script:listPage = if ($script:media) { 'music' } else { $pages[0] } }
+    $script:lyricsPage = $null
     $script:listClockText = $null
     if ($script:clock) { [void]$listPanel.Children.Add((New-ClockRow)) }
     if ($script:listPage -eq 'music') {
@@ -2966,6 +3298,9 @@ function Show-List([switch]$Refresh) {
             Animate60 $card ([System.Windows.UIElement]::OpacityProperty) 0 1 320
         }
         $script:listMediaKey = $script:media.Key
+    } elseif ($script:listPage -eq 'lyrics') {
+        Set-Theme $script:media.Accent
+        [void]$listPanel.Children.Add((New-LyricsPage))
     } elseif ($items.Count -eq 0) {
         $t = New-Object System.Windows.Controls.TextBlock
         $t.Text = T 'Tidak ada notifikasi' 'No notifications'
@@ -3053,14 +3388,14 @@ function Show-List([switch]$Refresh) {
         }
     }
     # Titik halaman hanya kalau memang ada dua halaman
-    if ($script:media -and $hasNotif) { [void]$listPanel.Children.Add((New-PageDots)) }
+    if ($pages.Count -gt 1) { [void]$listPanel.Children.Add((New-PageDots)) }
     $listPanel.Measure((New-Object System.Windows.Size(($WIDE_W - 2), [double]::PositiveInfinity)))
     $h = [Math]::Min($MAX_ISLAND_H, [Math]::Max(56, [Math]::Ceiling($listPanel.DesiredSize.Height) + 2))
     Resize-Island $WIDE_W $h 24
     Set-IslandVisible $true
     if ($Refresh) { Show-View 'ListView' } else { Show-View 'ListView' -Replay }
     # Halaman berpindah sendiri (mis. notifikasi terakhir dihapus -> player musik): beri animasi geser
-    if ($Refresh -and $prevPage -ne $script:listPage) { Slide-ListIn $script:listPage }
+    if ($Refresh -and $prevPage -ne $script:listPage) { Slide-ListIn ([array]::IndexOf($pages, $script:listPage) -gt [array]::IndexOf($pages, $prevPage)) }
 }
 
 # ---------- Aktivitas singkat ----------
@@ -3132,7 +3467,7 @@ function New-Columns($widths) {
 function Add-Cell($g, $el, $col) { [System.Windows.Controls.Grid]::SetColumn($el, $col); [void]$g.Children.Add($el) }
 
 # Pil pendek berisi satu baris teks (hasil cek update, dll)
-function Show-Info($text) {
+function Show-Info($text, $ms = 2800) {
     if (-not (Can-ShowActivity)) { $script:pendingActivity = @{ Kind = 'info'; Arg = $text }; return }
     $g = New-Columns 'Auto', '*'
     $g.Margin = '14,0,16,0'
@@ -3141,7 +3476,7 @@ function Show-Info($text) {
     Add-Cell $g $l 1
     $g.Measure((New-Object System.Windows.Size([double]::PositiveInfinity, [double]::PositiveInfinity)))
     $w = [Math]::Min($WIDE_W, [Math]::Max(200.0, [Math]::Ceiling($g.DesiredSize.Width) + 34))
-    Show-Activity 'info' $g $w 36 (Rgb 110 110 118) 2800
+    Show-Activity 'info' $g $w 36 (Rgb 110 110 118) $ms
 }
 
 # ---------- Volume & kecerahan ----------
@@ -3251,6 +3586,102 @@ function Check-Power {
     elseif ($pct -le 10 -and $script:lowWarned -gt 10) { $script:lowWarned = 10; Show-Battery $pct $false }
     elseif ($pct -le 20 -and $script:lowWarned -gt 20) { $script:lowWarned = 20; Show-Battery $pct $false }
 }
+
+# ---------- Headset Bluetooth ----------
+# Output audio default pindah ke perangkat Bluetooth (headset/earbuds baru tersambung): pil berisi nama
+# perangkat dan baterainya, seperti pop-up earbuds di ponsel. Nama dan jenis perangkat dibaca dari catatan
+# audio Windows; baterai (kalau perangkat melaporkannya) dicari di latar belakang lalu ditambahkan ke pil.
+$GLYPH_HEADPHONE = [string][char]0xE7F6
+$BT_COLOR = Rgb 10 132 255
+$MMDEV_RENDER = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render'
+$script:audioDevice = $null
+$script:batteryJob = $null
+
+# Nama dan jenis koneksi perangkat output dari ID endpoint Core Audio ("{0.0.0.00000000}.{guid}")
+function Get-EndpointInfo($id) {
+    if (-not $id) { return $null }
+    $guid = $id.Substring($id.LastIndexOf('.') + 1)
+    $p = Get-ItemProperty (Join-Path (Join-Path $MMDEV_RENDER $guid) 'Properties') -ErrorAction SilentlyContinue
+    if (-not $p) { return $null }
+    $endpoint = $p.'{a45c254e-df1c-4efd-8020-67d146a850e0},2'
+    $device = $p.'{b3f8fa53-0004-438e-9003-51a46e139bfc},6'
+    $enum = "$($p.'{a45c254e-df1c-4efd-8020-67d146a850e0},24') $($p.'{b3f8fa53-0004-438e-9003-51a46e139bfc},2')"
+    @{ Name = $(if ($device) { "$device" } else { "$endpoint" }); Bluetooth = $enum -match 'BTH' }
+}
+
+$BATTERY_JOB = {
+    param($name)
+    try {
+        foreach ($d in @(Get-PnpDevice -PresentOnly -FriendlyName $name -ErrorAction Stop)) {
+            $p = Get-PnpDeviceProperty -InstanceId $d.InstanceId -KeyName '{104EA319-6EE2-4701-BD47-8DDBF425BBE5} 2' -ErrorAction SilentlyContinue
+            if ($p -and $null -ne $p.Data) { return @{ Battery = [int]$p.Data } }
+        }
+    } catch {}
+    @{ Battery = -1 }
+}
+
+function Check-AudioDevice {
+    if (-not $script:volWatcher) { return }
+    $id = $script:volWatcher.DeviceId
+    if (-not $id -or $id -eq $script:audioDevice) { return }
+    $first = $null -eq $script:audioDevice
+    $script:audioDevice = $id
+    # Perangkat yang sudah tersambung saat island mulai tidak perlu diumumkan
+    if ($first -or -not $script:settings.Headset) { return }
+    $info = Get-EndpointInfo $id
+    if ($info -and $info.Bluetooth) { Show-Headset $info.Name -1 }
+}
+
+function Show-Headset($name, $battery) {
+    if (-not (Can-ShowActivity)) { return }
+    $g = New-Columns 'Auto', '*', 'Auto'
+    $g.Margin = '10,0,14,0'
+    $ic = New-Object System.Windows.Controls.Border
+    $ic.Width = 32; $ic.Height = 32; $ic.CornerRadius = New-Object System.Windows.CornerRadius(16)
+    $ic.Background = New-Object System.Windows.Media.SolidColorBrush((Rgb 10 132 255 60))
+    $hg = New-Glyph $GLYPH_HEADPHONE 15 $BT_COLOR; $hg.HorizontalAlignment = 'Center'
+    $ic.Child = $hg
+    Add-Cell $g $ic 0
+    $sp = New-Object System.Windows.Controls.StackPanel
+    $sp.Margin = '11,0,10,0'; $sp.VerticalAlignment = 'Center'
+    [void]$sp.Children.Add((New-Label $name 13 '#FFFFFF' 'SemiBold'))
+    [void]$sp.Children.Add((New-Label (T 'Tersambung' 'Connected') 11 '#A1A1A6'))
+    Add-Cell $g $sp 1
+    $right = New-Object System.Windows.Controls.StackPanel
+    $right.Orientation = 'Horizontal'; $right.VerticalAlignment = 'Center'
+    Add-Cell $g $right 2
+    Set-HeadsetBattery $right $battery
+    Show-Activity 'headset' $g 290 52 $BT_COLOR 4000
+    $script:headsetUI = $right
+    # Baterai belum diketahui: cari di latar belakang, pil diperbarui kalau ketemu
+    if ($battery -lt 0) {
+        $script:batteryJob = Start-BgJob $BATTERY_JOB @($name)
+        $batteryTimer.Start()
+    }
+}
+
+function Set-HeadsetBattery($panel, $battery) {
+    $panel.Children.Clear()
+    if ($battery -lt 0) { return }
+    $color = if ($battery -le 20) { Rgb 255 69 58 } else { Rgb 48 209 88 }
+    $p = New-Label ('{0}%' -f $battery) 12.5 '#FFFFFF' 'SemiBold'
+    $p.Margin = '0,0,8,0'
+    [void]$panel.Children.Add($p)
+    [void]$panel.Children.Add((New-BatteryIcon $battery $color))
+    $panel.Opacity = 0
+    Animate $panel ([System.Windows.UIElement]::OpacityProperty) 1 260
+}
+
+$batteryTimer = New-Object System.Windows.Threading.DispatcherTimer
+$batteryTimer.Interval = Ms 300
+$batteryTimer.Add_Tick({
+    $r = Receive-BgJob $script:batteryJob
+    if (-not $r) { return }
+    $batteryTimer.Stop(); $script:batteryJob = $null
+    if ($r.Battery -ge 0 -and $script:mode -eq 'activity' -and $script:activity.Kind -eq 'headset' -and $script:headsetUI) {
+        Set-HeadsetBattery $script:headsetUI $r.Battery
+    }
+})
 
 # ---------- Mikrofon & kamera ----------
 # Titik oranye = mikrofon, hijau = kamera sedang dipakai (seperti indikator privasi di ponsel)
@@ -3418,48 +3849,202 @@ function New-ClockRow {
 }
 
 # ---------- Cek update ----------
-# Membandingkan versi ini dengan file VERSION di GitHub (sekali saat mulai, lalu tiap 24 jam).
-# Pemberitahuan otomatis hanya sekali per versi baru; dari menu selalu dijawab.
-$script:updateReq = $null
+# Sekali saat mulai lalu tiap 24 jam: file VERSION di GitHub dibandingkan dengan versi ini. Kalau lebih baru,
+# ringkasan perubahannya diambil dari pesan commit yang menaikkan VERSION. Semua jaringan berjalan di
+# runspace latar belakang, jadi island tidak pernah tersendat.
+# Versi baru muncul sebagai pop-up sekali, lalu tetap ada di daftar notifikasi sampai diklik (= pasang
+# update) atau dihapus (= lewati versi itu).
+$REPO_RAW = 'https://raw.githubusercontent.com/nkzwsn/mini-island-windows'
+$REPO_API = 'https://api.github.com/repos/nkzwsn/mini-island-windows'
+$REPO_ZIP = 'https://github.com/nkzwsn/mini-island-windows/archive/refs/heads/main.zip'
+$UPDATE_ID = [uint32]4100000000
+$script:islandItems = @()       # item daftar notifikasi milik island sendiri (update)
+$script:updateJob = $null
 $script:lastUpdateCheck = [DateTime]::MinValue
-function Start-UpdateCheck([switch]$Manual) {
-    if ($script:updateReq) { return }
-    $script:lastUpdateCheck = Get-Date
-    try {
-        $url = 'https://raw.githubusercontent.com/nkzwsn/mini-island-windows/main/VERSION?t=' + [DateTime]::UtcNow.Ticks
-        $script:updateReq = @{ Task = $http.GetStringAsync($url); Manual = [bool]$Manual }
-    } catch { Log "update: $_" }
+
+function Start-BgJob([scriptblock]$Script, [object[]]$Arguments) {
+    $ps = [powershell]::Create()
+    [void]$ps.AddScript($Script)
+    foreach ($a in $Arguments) { [void]$ps.AddArgument($a) }
+    @{ PS = $ps; Handle = $ps.BeginInvoke() }
 }
+# Hasil job (hashtable) kalau sudah selesai, $null kalau belum
+function Receive-BgJob($job) {
+    if (-not $job -or -not $job.Handle.IsCompleted) { return $null }
+    try { $r = @($job.PS.EndInvoke($job.Handle)); if ($r.Count) { $r[-1] } else { @{ Error = 'no result' } } }
+    catch { @{ Error = "$_" } }
+    finally { $job.PS.Dispose() }
+}
+
+$UPDATE_CHECK_JOB = {
+    param($cur, $raw, $api)
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        function Get-Text($url) {
+            $wc = New-Object System.Net.WebClient
+            $wc.Headers['User-Agent'] = 'MiniIsland'; $wc.Encoding = [Text.Encoding]::UTF8
+            try { $wc.DownloadString($url) } finally { $wc.Dispose() }
+        }
+        $latest = (Get-Text "$raw/main/VERSION?t=$([DateTime]::UtcNow.Ticks)").Trim()
+        $notes = @()
+        if ([version]$latest -gt [version]$cur) {
+            # Commit yang mengubah VERSION, terbaru dulu; berhenti di versi yang sedang dipakai
+            # (disimpan dulu ke variabel: ConvertFrom-Json di PowerShell 5.1 tidak memecah array lewat pipa)
+            $commits = ConvertFrom-Json (Get-Text "$api/commits?path=VERSION&per_page=15")
+            foreach ($c in $commits) {
+                $v = (Get-Text "$raw/$($c.sha)/VERSION").Trim()
+                if ([version]$v -le [version]$cur) { break }
+                $notes += (($c.commit.message -split "`n")[0]).Trim()
+            }
+        }
+        @{ Latest = $latest; Notes = $notes }
+    } catch { @{ Error = "$_" } }
+}
+
+function Start-UpdateCheck([switch]$Manual) {
+    if ($script:updateJob) { return }
+    $script:lastUpdateCheck = Get-Date
+    $script:updateJob = Start-BgJob $UPDATE_CHECK_JOB @($APP_VERSION, $REPO_RAW, $REPO_API)
+    $script:updateJob.Manual = [bool]$Manual
+}
+
 function Check-Update {
     if ($script:settings.CheckUpdates -and ((Get-Date) - $script:lastUpdateCheck).TotalHours -ge 24) { Start-UpdateCheck }
-    $r = $script:updateReq
-    if (-not $r -or -not $r.Task.IsCompleted) { return }
-    $script:updateReq = $null
-    if ($r.Task.Status -ne 'RanToCompletion') {
-        Log "update net: $($r.Task.Exception.InnerException.Message)"
-        if ($r.Manual) { Show-Info (T 'Gagal mengecek update' 'Could not check for updates') }
+    $j = $script:updateJob
+    if (-not $j) { return }
+    $r = Receive-BgJob $j
+    if (-not $r) { return }
+    $script:updateJob = $null
+    if ($r.Error) {
+        Log "update: $($r.Error)"
+        if ($j.Manual) { Show-Info (T 'Gagal mengecek update' 'Could not check for updates') }
         return
     }
-    $latest = "$($r.Task.Result)".Trim()
     $newer = $false
-    try { $newer = [version]$latest -gt [version]$APP_VERSION } catch { Log "update version: $latest" }
-    if ($newer -and ($r.Manual -or $script:settings.SkipVersion -ne $latest)) { Show-UpdateAvailable $latest }
-    elseif ($r.Manual) { Show-Info (T "Sudah versi terbaru (v$APP_VERSION)" "You're up to date (v$APP_VERSION)") }
+    try { $newer = [version]$r.Latest -gt [version]$APP_VERSION } catch { Log "update version: $($r.Latest)" }
+    if ($newer -and ($j.Manual -or $script:settings.SkipVersion -ne $r.Latest)) {
+        Show-UpdateAvailable $r.Latest @($r.Notes) -Popup:($j.Manual -or $script:settings.NotifiedVersion -ne $r.Latest)
+    } elseif ($j.Manual) { Show-Info (T "Sudah versi terbaru (v$APP_VERSION)" "You're up to date (v$APP_VERSION)") }
 }
-function Show-UpdateAvailable($latest) {
-    if (-not (Can-ShowActivity)) { $script:pendingActivity = @{ Kind = 'update'; Arg = $latest }; return }
-    $script:settings.SkipVersion = $latest; Save-Settings
-    $blue = Rgb 10 132 255
-    $g = New-Columns 'Auto', '*'
-    $g.Margin = '16,0,18,0'
-    Add-Cell $g (New-Glyph $GLYPH_DOWNLOAD 16 $blue) 0
-    $sp = New-Object System.Windows.Controls.StackPanel
-    $sp.Margin = '12,0,0,0'; $sp.VerticalAlignment = 'Center'
-    [void]$sp.Children.Add((New-Label (T "Update tersedia: v$latest" "Update available: v$latest") 13 '#FFFFFF' 'SemiBold'))
-    [void]$sp.Children.Add((New-Label (T 'Klik untuk membuka halaman unduhan' 'Click to open the download page') 11 '#A1A1A6'))
-    Add-Cell $g $sp 1
-    Show-Activity 'update' $g 300 52 $blue 8000 'repo'
+
+# Ikon Mini Island untuk item update: pil putih di kotak biru membulat
+function New-IslandLogo {
+    $dv = New-Object System.Windows.Media.DrawingVisual
+    $dc = $dv.RenderOpen()
+    $dc.DrawRoundedRectangle((New-Object System.Windows.Media.SolidColorBrush((Rgb 10 132 255))), $null, (New-Object System.Windows.Rect(0, 0, 64, 64)), 16, 16)
+    $dc.DrawRoundedRectangle([System.Windows.Media.Brushes]::White, $null, (New-Object System.Windows.Rect(12, 25, 40, 14)), 7, 7)
+    $dc.Close()
+    $bmp = New-Object System.Windows.Media.Imaging.RenderTargetBitmap(64, 64, 96, 96, [System.Windows.Media.PixelFormats]::Pbgra32)
+    $bmp.Render($dv); $bmp.Freeze()
+    $bmp
 }
+
+# Item "Update tersedia" di daftar notifikasi (pop-up hanya sekali per versi)
+function Show-UpdateAvailable($latest, $notes = @(), [switch]$Popup) {
+    $dot = '  ' + [char]0x00B7 + '  '
+    $click = T 'Klik untuk memasang' 'Click to install'
+    $body = if (@($notes).Count) { ((@($notes) | Select-Object -First 4) -join $dot) + $dot + $click } else { $click }
+    if (-not $script:islandLogo) { $script:islandLogo = New-IslandLogo }
+    $item = [PSCustomObject]@{
+        Id = $UPDATE_ID; App = 'Mini Island'; Aumid = ''; Kind = 'update'; Version = $latest
+        Title = (T "Update tersedia: v$latest" "Update available: v$latest"); Body = $body
+        Time = (Get-Date); Icon = $script:islandLogo; Photo = $null; Accent = (Rgb 10 132 255)
+    }
+    $script:islandItems = @($item)
+    Merge-Recent
+    if ($Popup) {
+        $script:settings.NotifiedVersion = $latest; Save-Settings
+        Enqueue-Notif $item
+        if ($script:mode -eq 'idle') { Process-Queue }
+    }
+    if ($script:mode -eq 'list') { Show-List -Refresh }
+}
+
+# Daftar notifikasi = notifikasi Windows + item island sendiri, terbaru di atas
+function Merge-Recent {
+    $script:recent = @(@($notifCache.Values) + @($script:islandItems) | Where-Object { $_ } | Sort-Object Time -Descending)
+}
+
+# Item island dihapus dari daftar: versi itu dilewati (tidak ditawarkan lagi)
+function Remove-IslandItem($id) {
+    $it = @($script:islandItems | Where-Object { $_.Id -eq $id })
+    if (-not $it.Count) { return $false }
+    if ($it[0].Kind -eq 'update') { $script:settings.SkipVersion = $it[0].Version; Save-Settings }
+    $script:islandItems = @($script:islandItems | Where-Object { $_.Id -ne $id })
+    Merge-Recent
+    $true
+}
+
+# ---------- Update sekali klik ----------
+# Unduh ZIP repo, cek isinya (versi terbaca, skrip bisa di-parse), salin file aplikasi ke folder island
+# (cadangan island.ps1 lama disimpan sebagai island.ps1.bak), lalu island keluar dengan kode 3 supaya
+# launcher menjalankan versi baru. Pengaturan, lirik tersimpan dan cache tidak disentuh.
+$UPDATE_DOWNLOAD_JOB = {
+    param($zipUrl)
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        $tmp = Join-Path $env:TEMP ('MiniIslandUpdate-' + [guid]::NewGuid().ToString('N'))
+        [void](New-Item -ItemType Directory -Path $tmp)
+        $zip = Join-Path $tmp 'update.zip'
+        $wc = New-Object System.Net.WebClient
+        $wc.Headers['User-Agent'] = 'MiniIsland'
+        try { $wc.DownloadFile($zipUrl, $zip) } finally { $wc.Dispose() }
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        [IO.Compression.ZipFile]::ExtractToDirectory($zip, (Join-Path $tmp 'x'))
+        $src = Get-ChildItem (Join-Path $tmp 'x') -Directory | Select-Object -First 1
+        $text = [IO.File]::ReadAllText((Join-Path $src.FullName 'island.ps1'))
+        if ($text -notmatch "APP_VERSION = '([0-9.]+)'") { throw 'versi tidak terbaca' }
+        $ver = $Matches[1]
+        $tokens = $null; $errs = $null
+        [void][System.Management.Automation.Language.Parser]::ParseInput($text, [ref]$tokens, [ref]$errs)
+        if (@($errs).Count) { throw "skrip rusak: $($errs[0].Message)" }
+        @{ Dir = $src.FullName; Version = $ver; Tmp = $tmp }
+    } catch { @{ Error = "$_" } }
+}
+
+function Start-SelfUpdate {
+    if ($script:selfUpdateJob) { return }
+    $script:selfUpdateJob = Start-BgJob $UPDATE_DOWNLOAD_JOB @($REPO_ZIP)
+    $updateTimer.Start()
+    Show-Info (T 'Mengunduh update...' 'Downloading update...') 60000
+}
+
+$updateTimer = New-Object System.Windows.Threading.DispatcherTimer
+$updateTimer.Interval = Ms 300
+$updateTimer.Add_Tick({
+    $r = Receive-BgJob $script:selfUpdateJob
+    if (-not $r) { return }
+    $updateTimer.Stop(); $script:selfUpdateJob = $null
+    if ($r.Error) {
+        Log "self-update: $($r.Error)"
+        Show-Info (T 'Update gagal, coba lagi nanti' 'Update failed, try again later')
+        return
+    }
+    try {
+        if ([version]$r.Version -le [version]$APP_VERSION) { Show-Info (T "Sudah versi terbaru (v$APP_VERSION)" "You're up to date (v$APP_VERSION)"); return }
+        $self = Join-Path $here 'island.ps1'
+        Copy-Item $self (Join-Path $here 'island.ps1.bak') -Force
+        Copy-Item (Join-Path $r.Dir 'island.ps1') $self -Force
+        # File lain hanya diperbarui kalau memang ada di folder ini (folder instalasi biasa)
+        foreach ($f in 'Start Island.vbs', 'uninstall.ps1', 'Uninstall.cmd') {
+            $dst = Join-Path $here $f
+            if ((Test-Path $dst) -and (Test-Path (Join-Path $r.Dir $f))) { Copy-Item (Join-Path $r.Dir $f) $dst -Force }
+        }
+        Log "self-update: $APP_VERSION -> $($r.Version)"
+        $script:restartCode = 3
+        Show-Info (T "Memasang v$($r.Version)..." "Installing v$($r.Version)...") 60000
+        $restartTimer.Start()
+    } catch {
+        Log "self-update apply: $_"
+        Show-Info (T 'Update gagal, coba lagi nanti' 'Update failed, try again later')
+    } finally {
+        Remove-Item $r.Tmp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+})
+# Keluar dengan kode bukan 0: launcher menjalankan island lagi (sekarang versi baru)
+$restartTimer = New-Object System.Windows.Threading.DispatcherTimer
+$restartTimer.Interval = Ms 1200
+$restartTimer.Add_Tick({ $restartTimer.Stop(); Exit-Island })
 
 # Klik pada pil aktivitas
 function Click-Activity {
@@ -3582,8 +4167,13 @@ $onToggle = {
     Save-Settings
     switch ($name) {
         'Lyrics' { if ($script:settings.Lyrics) { Request-Lyrics }; $script:lyricIdx = -2; Refresh-MediaView }
-        'Romaji' { $script:partsVer++; $script:lyricIdx = -2 }
+        'Romaji' { $script:partsVer++; $script:lyricIdx = -2; if ($script:mode -eq 'list') { Show-List -Refresh } }
+        'Furigana' { $script:lyricIdx = -2; if ($script:mode -eq 'list') { Show-List -Refresh } }
         'MicCam' { Check-Sensors }
+        'Glow' {
+            $showing = $script:mode -eq 'media' -or ($script:mode -eq 'idle' -and $script:miniOn -and $script:miniKey -ne 'clock') -or ($script:mode -eq 'list' -and $script:listPage -ne 'notif')
+            if ($script:media -and $showing) { Set-Theme $script:media.Accent }
+        }
     }
 }
 
@@ -3592,6 +4182,7 @@ function Build-Menu {
     [void](Add-MI $menu (New-MI "Mini Island v$APP_VERSION" -Disabled))
     Add-Sep $menu
     [void](Add-MI $menu (New-MI (T 'Lirik' 'Lyrics') 'Lyrics' $onToggle -Check -Checked $script:settings.Lyrics))
+    [void](Add-MI $menu (New-MI (T 'Furigana untuk lirik Jepang' 'Furigana for Japanese lyrics') 'Furigana' $onToggle -Check -Checked $script:settings.Furigana))
     [void](Add-MI $menu (New-MI (T 'Romaji untuk lirik Jepang' 'Romaji for Japanese lyrics') 'Romaji' $onToggle -Check -Checked $script:settings.Romaji))
     $tm = Add-MI $menu (New-MI ((T 'Timing lirik (semua lagu): ' 'Lyric timing (all songs): ') + (Format-Delay $script:settings.LyricDelay)))
     $shift = {
@@ -3626,6 +4217,8 @@ function Build-Menu {
     [void](Add-MI $sm (New-MI (T 'Perubahan volume & kecerahan' 'Volume & brightness changes') 'VolumeOsd' $onToggle -Check -Checked $script:settings.VolumeOsd))
     [void](Add-MI $sm (New-MI (T 'Mengisi daya & baterai lemah' 'Charging & low battery') 'Charging' $onToggle -Check -Checked $script:settings.Charging))
     [void](Add-MI $sm (New-MI (T 'Mikrofon / kamera sedang dipakai' 'Microphone / camera in use') 'MicCam' $onToggle -Check -Checked $script:settings.MicCam))
+    [void](Add-MI $sm (New-MI (T 'Headset Bluetooth tersambung' 'Bluetooth headset connected') 'Headset' $onToggle -Check -Checked $script:settings.Headset))
+    [void](Add-MI $sm (New-MI (T 'Cahaya warna album' 'Album color glow') 'Glow' $onToggle -Check -Checked $script:settings.Glow))
     $screens = @([System.Windows.Forms.Screen]::AllScreens)
     if ($screens.Count -gt 1) {
         $mm = Add-MI $menu (New-MI 'Monitor')
@@ -3720,7 +4313,7 @@ $closeTimer.Add_Tick({
     $closeTimer.Stop()
     # Jangan tutup daftar selagi baris sedang ditarik (kursor boleh keluar dari island)
     if ($script:rowDragging -or [System.Windows.Input.Mouse]::Captured) { $closeTimer.Start(); return }
-    if ($script:mode -eq 'list' -and -not $script:hovering -and -not $script:overHot) { Go-Idle }
+    if ($script:mode -eq 'list' -and -not $script:hovering -and -not $script:overHot -and -not $script:listPinned) { Go-Idle }
 })
 
 $hotZone.Add_MouseEnter({
@@ -3750,7 +4343,10 @@ $pollTimer.Add_Tick({
     try { Check-Power } catch { Log "power: $_" }
     try { Check-Update } catch { Log "update: $_" }
     # Output audio bisa pindah (headset dicolok): pantau perangkat yang baru
-    if ($script:volWatcher -and ($script:pollCount % 3) -eq 0) { $script:volWatcher.Check() }
+    if ($script:volWatcher -and ($script:pollCount % 3) -eq 0) {
+        $script:volWatcher.Check()
+        try { Check-AudioDevice } catch { Log "headset: $_" }
+    }
 })
 
 # Island selalu di atas aplikasi lain, kecuali saat aplikasi fullscreen di depan:
@@ -3929,7 +4525,7 @@ $window.Add_SourceInitialized({
             if (((Get-Date) - $script:lastPageSwitch).TotalMilliseconds -lt 600) { $script:hwheelSum = 0; return }
             $script:hwheelSum += $s.Delta
             if ([Math]::Abs($script:hwheelSum) -ge 120) {
-                $target = if ($script:hwheelSum -gt 0) { 'music' } else { 'notif' }
+                $target = if ($script:hwheelSum -gt 0) { 'next' } else { 'prev' }
                 $script:hwheelSum = 0
                 Switch-ListPage $target
             }
@@ -4052,7 +4648,7 @@ $island.Add_PreviewMouseMove({
     if ($script:swiped -or $script:mode -ne 'list') { return }
     if ([Math]::Abs($dx) -gt 40) {
         $script:swiped = $true
-        Switch-ListPage $(if ($dx -lt 0) { 'music' } else { 'notif' })
+        Switch-ListPage $(if ($dx -lt 0) { 'next' } else { 'prev' })
     }
 })
 $island.Add_PreviewMouseLeftButtonUp({
@@ -4123,5 +4719,6 @@ $window.Dispatcher.add_UnhandledException({
 $exitCode = 0
 try { [void]$window.ShowDialog() } catch { Log "fatal: $_"; $exitCode = 1 }
 $mutex.ReleaseMutex()
-# Kode bukan 0 membuat launcher menjalankan ulang island
+# Kode bukan 0 membuat launcher menjalankan ulang island (juga setelah update terpasang)
+if ($script:restartCode) { $exitCode = $script:restartCode }
 exit $exitCode

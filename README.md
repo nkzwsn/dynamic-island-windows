@@ -18,13 +18,20 @@ and what's playing, instead of the toasts in the bottom-right corner.
   current **synced lyrics** (from [LRCLIB](https://lrclib.net)) with a karaoke sweep. Japanese lyrics
   get **furigana** and **romaji**. Songs that only have plain lyrics show them line by line at an
   estimated pace. Lyrics you've already played are kept on your PC, so they load instantly next time.
+- **Full lyrics page**: swipe to the third page of the list to see all the lyrics scrolling along with
+  the song. Click a line to jump to it. Pin it to keep the island open, and turn furigana / romaji on or
+  off for Japanese lyrics.
+- **Album color glow**: a faint, still glow in the album's color around the island while music plays.
 - **Volume & brightness**: a small level pill when you change them with the keyboard or taskbar.
 - **Charging**: a short animation when you plug in a laptop, and a warning at 20% and 10% battery.
+- **Bluetooth headset connected**: the device name and its battery (when the headset reports it).
 - **Microphone / camera in use**: an orange (mic) or green (camera) dot next to the thin line. Hover
   it to see which app is using it.
 - **Timer & stopwatch** (right-click menu). The time shows in the island, or in a small bubble next to
   it while music plays. Pause or stop it from the notification list.
-- **Update check**: tells you once when a new version is on GitHub.
+- **Updates**: a new version shows up once as a pop-up, then stays in the notification list with a short
+  list of what changed. Click it to install: the island downloads the new version, keeps your settings
+  and saved lyrics, and restarts itself.
 - **English or Indonesian** interface, and a choice of monitor if you have more than one.
 - Stays on top of other windows, but steps aside for fullscreen games and videos.
 - Light: about 1-2% CPU.
@@ -39,7 +46,8 @@ and what's playing, instead of the toasts in the bottom-right corner.
 
 The app is installed to `%LOCALAPPDATA%\MiniIsland` and starts automatically when you log in.
 
-**Updating**: download the new ZIP and run `Install.cmd` again. Your settings are kept. Installing over the
+**Updating**: click the update in the notification list, or download the new ZIP and run `Install.cmd`
+again. Your settings are kept either way. Installing over the
 older *Dynamic Island* version also moves its settings and saved lyrics over and removes the old copy.
 
 ## Uninstall
@@ -50,10 +58,11 @@ Double-click **`Uninstall.cmd`** (in the downloaded folder or in `%LOCALAPPDATA%
 
 **Right-click** the island, or the thin line at the top center when the island is hidden. The menu has:
 
-- Lyrics on/off, romaji on/off, and lyric timing for all songs (if lyrics are early or late for your
+- Lyrics on/off, furigana and romaji on/off, and lyric timing for all songs (if lyrics are early or late for your
   speakers/headset)
 - Timer (1-60 minutes) and stopwatch
-- Show: volume & brightness changes, charging & low battery, microphone / camera dots
+- Show: volume & brightness changes, charging & low battery, microphone / camera dots, Bluetooth
+  headset, album color glow
 - Monitor, language, check for updates, quit
 
 **Lyric timing for one song**: scroll on the lyrics button of the music card. It is remembered for
@@ -64,8 +73,10 @@ that song.
 - Notifications are read only on your PC and never leave it.
 - When lyrics are on, the **title and artist** of what's playing are sent to lrclib.net to find the
   lyrics (only the first time a song is played). Turn lyrics off to stop this.
-- Once a day the app reads the `VERSION` file of this repository on GitHub to check for updates.
-  To turn this off, set `"CheckUpdates": false` in `%LOCALAPPDATA%\MiniIsland\settings.json`.
+- Once a day the app reads the `VERSION` file and the list of version changes of this repository on
+  GitHub to check for updates. To turn this off, set `"CheckUpdates": false` in
+  `%LOCALAPPDATA%\MiniIsland\settings.json`. An update is only downloaded (from this repository) when you
+  click it; the previous version is kept as `island.ps1.bak`.
 - The microphone / camera dots only read Windows' own privacy records; the app never uses them.
 - Errors are logged to `island.log` in the install folder.
 
