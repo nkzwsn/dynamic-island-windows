@@ -9,7 +9,7 @@ try { if ((Get-Item $logFile -ErrorAction Stop).Length -gt 512KB) { Remove-Item 
 function Log($msg) { try { Add-Content -Path $logFile -Value ("{0:yyyy-MM-dd HH:mm:ss} {1}" -f (Get-Date), $msg) } catch {} }
 
 # Versi ini dibandingkan dengan file VERSION di GitHub untuk cek update
-$APP_VERSION = '1.2.4'
+$APP_VERSION = '1.3.0'
 $REPO_URL = 'https://github.com/nkzwsn/mini-island-windows'
 
 # Pengaturan yang diingat antar-restart (diatur lewat menu klik kanan)
@@ -521,6 +521,83 @@ public class VolumeWatcher : IAudioEndpointVolumeCallback {
     }
 }
 '@
+# Suara per aplikasi (puncak level tiap sesi audio di semua perangkat output aktif). Dipakai untuk memilih
+# pemutar yang benar-benar bersuara: video bisu di browser tetap melapor "Playing" ke Windows.
+Add-IslandType @'
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Text;
+[Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown), ComImport]
+interface IAaDeviceEnumerator { [PreserveSig] int EnumAudioEndpoints(int dataFlow, int stateMask, out IAaDeviceCollection devices); }
+[Guid("0BD7A1BE-7A1A-44DB-8397-CC5392387B5E"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown), ComImport]
+interface IAaDeviceCollection { [PreserveSig] int GetCount(out int n); [PreserveSig] int Item(int i, out IAaDevice dev); }
+[Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown), ComImport]
+interface IAaDevice { [PreserveSig] int Activate(ref Guid iid, int clsCtx, IntPtr p, [MarshalAs(UnmanagedType.IUnknown)] out object o); }
+[Guid("77AA99A0-1BD6-484F-8BC7-2C654C9A9B6F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown), ComImport]
+interface IAaSessionManager2 { int GetAudioSessionControl(); int GetSimpleAudioVolume(); [PreserveSig] int GetSessionEnumerator(out IAaSessionEnumerator e); }
+[Guid("E2F5BB11-0570-40CA-ACDD-3AA01277DEE8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown), ComImport]
+interface IAaSessionEnumerator { [PreserveSig] int GetCount(out int n); [PreserveSig] int GetSession(int i, out IAaSessionControl2 s); }
+[Guid("bfb7ff88-7239-4fc9-8fa2-07c950be9c6d"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown), ComImport]
+interface IAaSessionControl2 {
+    int GetState(); int GetDisplayName(); int SetDisplayName(); int GetIconPath(); int SetIconPath(); int GetGroupingParam();
+    int SetGroupingParam(); int RegisterAudioSessionNotification(); int UnregisterAudioSessionNotification();
+    int GetSessionIdentifier(); int GetSessionInstanceIdentifier(); [PreserveSig] int GetProcessId(out uint pid);
+}
+[Guid("C02216F6-8C67-4B5B-9D00-D008E73E0064"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown), ComImport]
+interface IAaMeter { [PreserveSig] int GetPeakValue(out float peak); }
+public static class AppAudio {
+    // Enumerator perangkat audio dipakai bersama satu proses dan SysVolume sudah membungkusnya dengan kelasnya
+    // sendiri: dibuat lewat CLSID dan langsung di-cast ke interface (cast ke kelas lain akan gagal)
+    static readonly Type enumType = Type.GetTypeFromCLSID(new Guid("BCDE0395-E52F-467C-8E3D-C4579291692E"));
+    [DllImport("kernel32.dll")] static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern int GetPackageFamilyName(IntPtr h, ref uint len, StringBuilder name);
+    static readonly Dictionary<uint, string[]> keys = new Dictionary<uint, string[]>();
+    // Puncak level (0..1) per aplikasi. Kunci: nama proses, dan untuk aplikasi Store juga nama keluarga
+    // paketnya (= awalan AUMID sesi media, mis. AppleInc.AppleMusicWin_nzyj5cx40ttqa)
+    public static Dictionary<string, float> Peaks() {
+        var r = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
+        var en = (IAaDeviceEnumerator)Activator.CreateInstance(enumType);
+        IAaDeviceCollection devs; int nd;
+        if (en.EnumAudioEndpoints(0, 1, out devs) != 0 || devs.GetCount(out nd) != 0) return r;   // eRender, aktif
+        for (int d = 0; d < nd; d++) {
+            try {
+                IAaDevice dev; object o; IAaSessionEnumerator se; int n;
+                var iid = typeof(IAaSessionManager2).GUID;
+                if (devs.Item(d, out dev) != 0 || dev.Activate(ref iid, 23, IntPtr.Zero, out o) != 0) continue;
+                if (((IAaSessionManager2)o).GetSessionEnumerator(out se) != 0 || se.GetCount(out n) != 0) continue;
+                for (int i = 0; i < n; i++) {
+                    try {
+                        IAaSessionControl2 s; uint pid; float peak;
+                        if (se.GetSession(i, out s) != 0) continue;
+                        s.GetProcessId(out pid);
+                        if (pid == 0 || ((IAaMeter)s).GetPeakValue(out peak) != 0) continue;
+                        foreach (var k in Keys(pid)) { float v; if (!r.TryGetValue(k, out v) || peak > v) r[k] = peak; }
+                    } catch { }
+                }
+            } catch { }
+        }
+        return r;
+    }
+    static string[] Keys(uint pid) {
+        string[] k;
+        if (keys.TryGetValue(pid, out k)) return k;
+        var list = new List<string>();
+        try { list.Add(Process.GetProcessById((int)pid).ProcessName); } catch { }
+        IntPtr h = OpenProcess(0x1000, false, pid);   // PROCESS_QUERY_LIMITED_INFORMATION
+        if (h != IntPtr.Zero) {
+            try { uint len = 256; var sb = new StringBuilder(256); if (GetPackageFamilyName(h, ref len, sb) == 0) list.Add(sb.ToString()); }
+            finally { CloseHandle(h); }
+        }
+        // PID bisa dipakai ulang oleh proses lain: cache dikosongkan sesekali
+        if (keys.Count > 300) keys.Clear();
+        k = list.ToArray(); keys[pid] = k;
+        return k;
+    }
+}
+'@
 # Kecerahan layar (laptop / monitor yang mendukung) berubah: event WMI, diteruskan ke thread UI
 Add-Type -AssemblyName System.Management
 Add-IslandType -Refs @([System.Windows.Threading.Dispatcher].Assembly.Location, [System.Management.ManagementEventWatcher].Assembly.Location) @'
@@ -974,14 +1051,24 @@ function Trim-Bitmap($bmp) {
 }
 
 # Baca gambar dari RandomAccessStreamReference WinRT (logo aplikasi, cover album)
-function Read-StreamImage($ref, $decodeWidth = 0) {
+function Read-StreamImage($ref, $decodeWidth = 0) { New-StreamBitmap (Read-StreamBytes $ref) $decodeWidth }
+
+function Read-StreamBytes($ref) {
     $stream = Await ($ref.OpenReadAsync()) ([Windows.Storage.Streams.IRandomAccessStreamWithContentType])
     # Dipanggil lewat reflection: PowerShell gagal mengonversi sebagian stream (mis. cover album
     # Spotify) ke IInputStream, sedangkan reflection membiarkan .NET yang melakukan cast-nya
     $netStream = $asStreamForRead.Invoke($null, @($stream))
     $ms = New-Object System.IO.MemoryStream
     $netStream.CopyTo($ms); $netStream.Dispose()
-    $ms.Position = 0
+    , $ms.ToArray()
+}
+
+function Get-BytesHash($bytes) {
+    [BitConverter]::ToString((New-Object System.Security.Cryptography.SHA1Managed).ComputeHash($bytes))
+}
+
+function New-StreamBitmap($bytes, $decodeWidth = 0) {
+    $ms = New-Object System.IO.MemoryStream(, $bytes)
     $bmp = New-Object System.Windows.Media.Imaging.BitmapImage
     $bmp.BeginInit(); $bmp.CacheOption = 'OnLoad'; $bmp.StreamSource = $ms
     if ($decodeWidth -gt 0) { $bmp.DecodePixelWidth = $decodeWidth }
@@ -1199,17 +1286,56 @@ $script:mediaTick = 0
 $script:mediaForce = $false
 $script:pendingMediaPopup = $false
 $script:progressBars = @()
+# Pemutar di browser (YouTube, YouTube Music): cover datang terlambat, judul video perlu diurai (Get-SongQuery)
+$BROWSER_APP = '(?i)chrome|msedge|edge|firefox|308046B0AF4A39CB|brave|opera|vivaldi'
+
+# Kapan tiap aplikasi terakhir terdengar bersuara (kunci = nama proses / keluarga paket Store)
+$script:audibleAt = @{}
+function Update-AppAudio {
+    try { $p = [AppAudio]::Peaks() } catch { Log "app audio: $_"; return }
+    $now = Get-Date
+    foreach ($k in $p.Keys) { if ($p[$k] -gt 0.0005) { $script:audibleAt[$k] = $now } }
+}
+# Kunci audio untuk AUMID sesi media: aplikasi Store "Keluarga!App" -> keluarganya, "Spotify.exe" -> Spotify,
+# browser -> nama prosesnya (aplikasi web terpasang memakai AUMID browsernya, mis. Chrome._crx_...)
+function Get-AppAudioKey($aumid) {
+    if ($aumid -match '^([^!]+_[a-z0-9]{13})!') { return $matches[1] }
+    switch -regex ($aumid) {
+        '^chrome' { return 'chrome' }
+        '^msedge' { return 'msedge' }
+        '^308046B0AF4A39CB' { return 'firefox' }
+        '^(brave|opera|vivaldi)' { return $matches[1] }
+    }
+    $aumid -replace '\.exe$', ''
+}
+# Bersuara dalam 3 detik terakhir (jeda antarlagu / bagian hening tidak langsung dianggap bisu)
+function Test-AppAudible($aumid) {
+    $t = $script:audibleAt[(Get-AppAudioKey $aumid)]
+    [bool]($t -and ((Get-Date) - $t).TotalSeconds -lt 3)
+}
 $GLYPH_PREV = [string][char]0xE892; $GLYPH_NEXT = [string][char]0xE893
 $GLYPH_PLAY = [string][char]0xE768; $GLYPH_PAUSE = [string][char]0xE769; $GLYPH_MUSIC = [string][char]0xE8D6
 
 function Poll-Media {
     if (-not $script:mediaMgr) { return }
-    # Spotify, Chrome (YouTube Music), Apple Music bisa terbuka bersamaan: utamakan yang sedang diputar
-    $sess = $null
+    # Spotify, Chrome (YouTube Music), Apple Music bisa terbuka bersamaan. Urutan: diputar dan bersuara,
+    # diputar, lalu yang di-pause; kalau sama kuat, pemutar yang sedang ditampilkan menang (lalu pilihan Windows).
+    # Video bisu di browser (autoplay reels/feed Facebook, Instagram, dll) tetap melapor "Playing":
+    # diabaikan, supaya tidak menutupi musik yang sedang diputar.
+    Update-AppAudio
+    $sess = $null; $best = -1
+    $shown = if ($script:media) { $script:media.App } else { '' }
+    $winCur = $script:mediaMgr.GetCurrentSession()
+    $winApp = if ($winCur) { $winCur.SourceAppUserModelId } else { '' }
     foreach ($s in $script:mediaMgr.GetSessions()) {
-        if ("$($s.GetPlaybackInfo().PlaybackStatus)" -eq 'Playing') { $sess = $s; break }
+        $a = $s.SourceAppUserModelId
+        $on = "$($s.GetPlaybackInfo().PlaybackStatus)" -eq 'Playing'
+        $loud = Test-AppAudible $a
+        if ($on -and -not $loud -and $a -match $BROWSER_APP) { continue }
+        $score = $(if ($on -and $loud) { 8 } elseif ($on) { 6 } else { 2 })
+        if ($a -eq $shown) { $score += 1 } elseif ($a -eq $winApp) { $score += 0.5 }
+        if ($score -gt $best) { $sess = $s; $best = $score }
     }
-    if (-not $sess) { $sess = $script:mediaMgr.GetCurrentSession() }
     if (-not $sess) {
         if ($script:media) { $script:media = $null; Media-Changed $false }
         return
@@ -1226,27 +1352,12 @@ function Poll-Media {
     if (-not $props.Title) { return }   # metadata kadang kosong sesaat saat ganti lagu
     $key = "$app|$($props.Title)|$($props.Artist)"
     if (-not $old -or $old.Key -ne $key) {
-        $art = $null; $accent = $null; $accent2 = $null; $accent3 = $null
-        if ($props.Thumbnail) {
-            try {
-                $art = Read-StreamImage $props.Thumbnail 96
-                $accent = Get-DominantColor $art
-                if ($accent) {
-                    $accent2 = Get-SecondColor $art $accent
-                    $accent3 = Get-SecondColor $art $accent $accent2
-                }
-            } catch { Log "cover: $_" }
-        }
-        # Cover hitam-putih (tidak ada warna dominan): palet perak supaya tetap cocok dengan covernya.
-        # Hijau hanya untuk lagu tanpa cover sama sekali.
-        if (-not $accent -and $art) { $accent = Rgb 200 200 210; $accent2 = Rgb 240 240 246; $accent3 = Rgb 150 150 162 }
-        if (-not $accent) { $accent = [System.Windows.Media.ColorConverter]::ConvertFromString('#30D158') }
-        if (-not $accent2) { $accent2 = Rgb ($accent.R + (255 - $accent.R) * 0.5) ($accent.G + (255 - $accent.G) * 0.5) ($accent.B + (255 - $accent.B) * 0.5) }
+        $cv = Read-Cover $props.Thumbnail
         $tl = Get-Timeline $sess $playing
         $script:media = [PSCustomObject]@{
-            Key = $key; App = $app; Title = $props.Title; Artist = $props.Artist
-            Art = $art; Accent = $accent; Accent2 = $accent2; Accent3 = $accent3; Playing = $playing; Session = $sess
-            Pos = $tl.Pos; End = $tl.End; PosAt = (Get-Date)
+            Key = $key; App = $app; Title = $props.Title; Artist = $props.Artist; Album = $props.AlbumTitle
+            Art = $cv.Art; Accent = $cv.Accent; Accent2 = $cv.Accent2; Accent3 = $cv.Accent3; CoverHash = $cv.Hash; CoverChecks = 0
+            Playing = $playing; Session = $sess; Pos = $tl.Pos; End = $tl.End; PosAt = (Get-Date)
         }
         # Durasi lagu sering belum tersedia tepat saat ganti lagu: cek lagi di tick berikutnya
         if ($tl.End -le 0) { $script:mediaForce = $true }
@@ -1273,6 +1384,8 @@ function Poll-Media {
             # Durasi baru datang (atau hilang): tampilan perlu dibangun ulang supaya gelombang muncul
             $old.Pos = $tl.Pos; $old.End = $tl.End; $old.PosAt = Get-Date
             Media-Changed $false
+            # Lirik video di browser baru dicari setelah durasinya diketahui (lihat Request-Lyrics)
+            if ($tl.End -gt 0) { try { Request-Lyrics } catch { Log "lyrics req: $_" } }
         } elseif ($old.End -gt 0 -and [Math]::Abs($tl.End - $old.End) -gt 1 -and $script:endMismatch -lt 3) {
             # Durasi berubah tapi judul belum: Spotify mengirim timeline lagu baru sesaat sebelum judulnya.
             # Jangan sinkronkan (progress lagu lama akan lompat ke 0:00); tunggu judul baru di tick berikutnya.
@@ -1288,6 +1401,42 @@ function Poll-Media {
             if ($script:miniBar) { Start-Progress $script:miniBar }
         }
     }
+    # Browser mengirim ikonnya sendiri sebagai cover saat video berganti; thumbnail videonya menyusul
+    # beberapa detik kemudian (judulnya tidak berubah). Cek ulang cover selama 30 tick pertama.
+    $m = $script:media
+    if ($m -and $m.Key -eq $key -and "$app" -match $BROWSER_APP -and $m.CoverChecks -lt 30 -and $props.Thumbnail) {
+        $m.CoverChecks++
+        $h = $m.CoverHash
+        try { $h = Get-BytesHash (Read-StreamBytes $props.Thumbnail) } catch {}
+        if ($h -ne $m.CoverHash) {
+            $cv = Read-Cover $props.Thumbnail
+            $m.Art = $cv.Art; $m.Accent = $cv.Accent; $m.Accent2 = $cv.Accent2; $m.Accent3 = $cv.Accent3; $m.CoverHash = $cv.Hash
+            Media-Changed $false
+        }
+    }
+}
+
+# Cover lagu dan warna-warnanya (warna dominan + dua warna pendamping)
+function Read-Cover($thumb) {
+    $c = [PSCustomObject]@{ Art = $null; Accent = $null; Accent2 = $null; Accent3 = $null; Hash = '' }
+    if ($thumb) {
+        try {
+            $bytes = Read-StreamBytes $thumb
+            $c.Hash = Get-BytesHash $bytes
+            $c.Art = New-StreamBitmap $bytes 96
+            $c.Accent = Get-DominantColor $c.Art
+            if ($c.Accent) {
+                $c.Accent2 = Get-SecondColor $c.Art $c.Accent
+                $c.Accent3 = Get-SecondColor $c.Art $c.Accent $c.Accent2
+            }
+        } catch { Log "cover: $_" }
+    }
+    # Cover hitam-putih (tidak ada warna dominan): palet perak supaya tetap cocok dengan covernya.
+    # Hijau hanya untuk lagu tanpa cover sama sekali.
+    if (-not $c.Accent -and $c.Art) { $c.Accent = Rgb 200 200 210; $c.Accent2 = Rgb 240 240 246; $c.Accent3 = Rgb 150 150 162 }
+    if (-not $c.Accent) { $c.Accent = [System.Windows.Media.ColorConverter]::ConvertFromString('#30D158') }
+    if (-not $c.Accent2) { $a = $c.Accent; $c.Accent2 = Rgb ($a.R + (255 - $a.R) * 0.5) ($a.G + (255 - $a.G) * 0.5) ($a.B + (255 - $a.B) * 0.5) }
+    $c
 }
 
 function Get-Timeline($sess, $playing) {
@@ -2160,7 +2309,7 @@ Add-Type -AssemblyName System.Net.Http
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 $http = New-Object System.Net.Http.HttpClient
 $http.Timeout = [TimeSpan]::FromSeconds(12)
-[void]$http.DefaultRequestHeaders.UserAgent.TryParseAdd('MiniIsland/1.1 (personal Windows widget)')
+[void]$http.DefaultRequestHeaders.UserAgent.TryParseAdd("MiniIsland/$APP_VERSION (+$REPO_URL)")
 $lyricsCache = @{}
 $lyricsFails = @{}
 $script:lyricsReq = $null
@@ -2173,6 +2322,47 @@ function Clean-SongText($s) {
     $s = [regex]::Replace("$s", '\s*[\(\[][^\)\]]*(feat|ft\.|official|video|audio|lyric|remaster|m/?v)[^\)\]]*[\)\]]', '', 'IgnoreCase')
     $s = [regex]::Replace($s, '\s+-\s+.*remaster.*$', '', 'IgnoreCase')
     $s.Trim()
+}
+
+# Video biasa di browser (YouTube, Facebook, dll; tanpa album): judulnya berisi artis dan tag video, "artis"-nya
+# nama channel. YouTube Music, Spotify, Apple Music mengisi album, jadi judul dan artisnya dipakai apa adanya.
+# Video = video browser; Music = judulnya memang seperti lagu (video lain, mis. reels, tidak dicarikan lirik).
+function Get-SongQuery($m) {
+    $title = "$($m.Title)"; $artist = "$($m.Artist)"
+    $video = "$($m.App)" -match $BROWSER_APP -and -not $m.Album
+    $music = -not $video
+    if ($video) {
+        # [MV], (Official Video), [OFFICIAL], (lebar penuh) MV, "| channel" di belakang, "Official Music Video" di akhir
+        # (juga versi: "(Full version)", "<Platinum Long Version>" kurung sudut lebar penuh, "(TV size)")
+        $t = [regex]::Replace($title, '\s*[\(\[\u3010\uff1c<\u3008][^\)\]\u3011\uff1e>\u3009]*(official|video|audio|lyric|m/?v|4k|hd|\bver\b|version|\bfull\b|\blong\b|\bsize\b)[^\)\]\u3011\uff1e>\u3009]*[\)\]\u3011\uff1e>\u3009]', '', 'IgnoreCase')
+        $tagged = $t -ne $title
+        $t = [regex]::Replace($t, '\s*[|\uFF5C].*$', '')
+        $title = [regex]::Replace($t, '\s*(official\s*)?(music\s*video|lyric\s*video|video|audio|m/?v)\s*$', '', 'IgnoreCase')
+        # Tag video musik, atau channel lagu: "Artis - Topic" (dibuat otomatis oleh YouTube), "ArtisVEVO", "Artis Official"
+        $music = $tagged -or $title -ne $t -or $artist -match '(?i)\s-\sTopic$|VEVO$|official|\u516C\u5F0F'
+        # Artis dari nama channel: "ArtisVEVO", "Artis Official", "Artis (kanji) official channel"
+        $artist = $artist -replace 'VEVO$', '' -replace '(?i)\s*(official|\u516C\u5F0F).*$', ''
+        # Judul lagu dalam tanda kutip: Kano "Stella-rium", YOASOBI (kurung siku Jepang) Idol, Ado (kurung lebar penuh) Show
+        if ($title -match '^(.*?)\s*["\u201C\u300C\u300E\u3010](.+?)["\u201D\u300D\u300F\u3011]') {
+            if ($matches[1].Trim()) { $artist = $matches[1] }
+            $title = $matches[2]; $music = $true
+        } elseif ($title -match '^(.+?)\s+[-\u2013\u2014]\s+(.+)$') {
+            # "Artis - Judul"; "Judul - Artis" kalau bagian kanan = nama channel
+            if ($artist -and $artist.IndexOf($matches[1].Trim(), [StringComparison]::OrdinalIgnoreCase) -lt 0 -and
+                $artist.IndexOf($matches[2].Trim(), [StringComparison]::OrdinalIgnoreCase) -ge 0) { $title = $matches[1]; $artist = $matches[2] }
+            else { $artist = $matches[1]; $title = $matches[2] }
+            $music = $true
+        } elseif ($title -match '^(.+?)(?:\s+/\s+|\s*\uFF0F\s*)(.+)$') {
+            # "Judul / Artis" (umum di video Jepang); "Artis / Judul" kalau bagian kiri = nama channel
+            if ($artist -and $artist.IndexOf($matches[1].Trim(), [StringComparison]::OrdinalIgnoreCase) -ge 0) { $artist = $matches[1]; $title = $matches[2] }
+            else { $title = $matches[1]; $artist = $matches[2] }
+            $music = $true
+        }
+    }
+    # Artis pertama saja; YouTube Music kadang menambah " - Topic", Apple Music menambah " (em dash) Album",
+    # channel kadang memakai dua nama ("nama Jepang / nama Latin")
+    $artist = (($artist -replace '\s+-\s+Topic$', '' -replace '\s+\u2014\s+.*$', '') -split ',|&|\s+/\s+|\s+feat\.?\s+|\s+x\s+')[0].Trim()
+    @{ Title = Clean-SongText $title; Artist = $artist; Video = $video; Music = $music }
 }
 
 # Lirik yang sudah pernah dicari disimpan di folder lyrics (satu file per lagu): lagu yang sering diputar
@@ -2216,9 +2406,11 @@ function Request-Lyrics {
     if (-not $m -or -not $script:settings.Lyrics) { return }
     if ($lyricsCache.ContainsKey($m.Key)) { return }
     if ($script:lyricsReq -and $script:lyricsReq.Key -eq $m.Key) { return }
-    # Artis pertama saja; YouTube Music kadang menambah " - Topic"
-    $artist = (("$($m.Artist)" -replace '\s+-\s+Topic$', '') -split ',|&|\s+feat\.?\s+|\s+x\s+')[0].Trim()
-    $title = Clean-SongText $m.Title
+    $q = Get-SongQuery $m
+    # Video di browser: hanya yang judulnya seperti lagu, dan setelah durasinya diketahui (tanpa durasi,
+    # hasil pencarian apa pun diterima). Dipanggil lagi dari Poll-Media saat durasinya datang.
+    if ($q.Video -and (-not $q.Music -or $m.End -le 0)) { return }
+    $title = $q.Title; $artist = $q.Artist
     $file = Get-LyricsFile $title $artist
     if (Test-Path $file) {
         try {
@@ -2236,7 +2428,7 @@ function Request-Lyrics {
     }
     $url = 'https://lrclib.net/api/search?track_name={0}&artist_name={1}' -f [uri]::EscapeDataString($title), [uri]::EscapeDataString($artist)
     try { $task = $http.GetStringAsync($url) } catch { Log "lyrics: $_"; return }
-    $script:lyricsReq = @{ Key = $m.Key; Task = $task; Stage = 1; Title = $title; Artist = $artist; File = $file; Plain = $null }
+    $script:lyricsReq = @{ Key = $m.Key; Task = $task; Stage = 1; Title = $title; Artist = $artist; File = $file; Plain = $null; Strict = $q.Video }
 }
 
 # Lirik lagu yang sedang diputar (baris berwaktu), atau $null. Lirik biasa (tanpa waktu) dibagi rata
@@ -2281,6 +2473,28 @@ function Get-SongOffset {
 }
 function Get-LyricDelay { $script:settings.LyricDelay + (Get-SongOffset) }
 
+# Langkah berikutnya: pencarian bebas "judul artis" (2), lalu judul saja (3). lrclib menolak permintaan
+# yang terlalu rapat (503, walau retry-after-nya 1 detik; jeda 1,5 detik masih ditolak), jadi dikirim
+# Check-Lyrics sesudah jeda.
+function Queue-FreeSearch($r, $stage = 2) {
+    $q = if ($stage -eq 3) { $r.Title } else { "$($r.Title) $($r.Artist)" }
+    $r.Url = 'https://lrclib.net/api/search?q={0}' -f [uri]::EscapeDataString($q)
+    $r.Task = $null; $r.Stage = $stage; $r.At = (Get-Date).AddSeconds(3)
+    $script:lyricsReq = $r
+}
+
+# Huruf dan angka saja, huruf kecil: "Chimame-tai" -> "chimametai"
+function Get-PlainText($s) { ("$s" -replace '[^\p{L}\p{N}]', '').ToLowerInvariant() }
+
+# Nama sama kalau huruf/angkanya sama, abaikan tanda baca, spasi dan besar kecil ("Chimame-tai" = "chimametai").
+# Salah satu boleh lebih panjang ("Stella-rium" di "Stella-rium (TV size)") asal yang pendek minimal 3 huruf.
+function Test-SameText($a, $b) {
+    $a = Get-PlainText $a; $b = Get-PlainText $b
+    if (-not $a -or -not $b) { return $false }
+    if ($a.Length -gt $b.Length) { $a, $b = $b, $a }
+    $a -eq $b -or ($a.Length -ge 3 -and $b.Contains($a))
+}
+
 # Dicek tiap detik (Poll) dan tiap tick lirik; tidak pernah menunggu jaringan di thread UI
 function Check-Lyrics {
     $rt = $script:lyricsRetry
@@ -2289,15 +2503,33 @@ function Check-Lyrics {
         if ($script:media -and $script:media.Key -eq $rt.Key) { Request-Lyrics }
     }
     $r = $script:lyricsReq
-    if (-not $r -or -not $r.Task.IsCompleted) { return }
+    # Pencarian bebas yang ditunda (lihat jeda setelah pencarian ketat gagal di bawah)
+    if ($r -and -not $r.Task -and (Get-Date) -ge $r.At) {
+        try { $r.Task = $http.GetStringAsync($r.Url) } catch { Log "lyrics: $_"; $script:lyricsReq = $null; return }
+    }
+    if (-not $r -or -not $r.Task -or -not $r.Task.IsCompleted) { return }
     $script:lyricsReq = $null
     $pick = $null
     if ($r.Task.Status -eq 'RanToCompletion') {
         $end = if ($script:media -and $script:media.Key -eq $r.Key) { $script:media.End } else { 0 }
-        try { $pick = Pick-Lyrics (ConvertFrom-Json $r.Task.Result) $end } catch { Log "lyrics parse: $_" }
+        try {
+            # (Tanpa @(): ConvertFrom-Json PowerShell 5.1 mengeluarkan array JSON sebagai satu objek)
+            $res = ConvertFrom-Json $r.Task.Result
+            # Pencarian judul saja bisa menemukan lagu lain berjudul sama: hanya artis yang cocok, atau durasi
+            # yang hampir persis sama. Video di browser (judulnya bisa kalimat biasa): di semua tahap, dan judul
+            # lagunya harus memuat seluruh judul video (lagu "Food" bukan "trying street food in Jakarta").
+            $same = { (Test-SameText $_.artistName $r.Artist) -or ($end -gt 0 -and [Math]::Abs([double]$_.duration - $end) -le 2) }
+            if ($r.Strict) {
+                $t = Get-PlainText $r.Title
+                $res = @($res | Where-Object { $t -and (Get-PlainText $_.trackName).Contains($t) -and (& $same) })
+            } elseif ($r.Stage -eq 3) { $res = @($res | Where-Object $same) }
+            $pick = Pick-Lyrics $res $end
+        } catch { Log "lyrics parse: $_" }
     } else {
         # Gagal jaringan / server sibuk (503): coba lagi 20 detik kemudian, maksimal 3 kali per lagu
         Log "lyrics net: $($r.Task.Exception.InnerException.Message)"
+        # Pencarian ketat bisa ditolak server untuk teks tertentu (mis. 503): coba pencarian bebas
+        if ($r.Stage -eq 1) { Queue-FreeSearch $r; return }
         $n = 1 + [int]$lyricsFails[$r.Key]
         $lyricsFails[$r.Key] = $n
         if ($n -lt 3) { $script:lyricsRetry = @{ Key = $r.Key; At = (Get-Date).AddSeconds(20) } }
@@ -2306,10 +2538,10 @@ function Check-Lyrics {
     }
     # Pencarian ketat tidak menemukan lirik bersinkron: coba pencarian bebas "judul artis"
     # (lirik biasa dari pencarian pertama disimpan sebagai cadangan)
-    if ((-not $pick -or -not $pick.Synced) -and $r.Stage -eq 1) {
-        if ($pick) { $r.Plain = $pick }
-        $url = 'https://lrclib.net/api/search?q={0}' -f [uri]::EscapeDataString("$($r.Title) $($r.Artist)")
-        try { $r.Task = $http.GetStringAsync($url); $r.Stage = 2; $script:lyricsReq = $r; return } catch { Log "lyrics: $_" }
+    if ((-not $pick -or -not $pick.Synced) -and $r.Stage -lt 3) {
+        if ($pick -and -not $r.Plain) { $r.Plain = $pick }
+        # Nama artis sering ditulis beda di lrclib (mis. tanpa tanda hubung): terakhir, cari judulnya saja
+        Queue-FreeSearch $r ($r.Stage + 1); return
     }
     if ((-not $pick -or -not $pick.Synced) -and $r.Plain) { $pick = $r.Plain }
     if (-not $pick) { $pick = @{ None = $true } }

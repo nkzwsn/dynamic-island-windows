@@ -14,9 +14,13 @@ and what's playing, instead of the toasts in the bottom-right corner.
 - **Now Playing** for Spotify, YouTube Music / browsers, Apple Music and any app that shows in the
   Windows media flyout: cover, title, play/pause/next, volume (scroll on the card), and a wavy
   progress bar in the album's colors. **Click or drag the wave to jump** to another part of the song.
+  When several apps play at once, the one you can actually hear is shown: muted autoplay videos
+  (Facebook, Instagram, ...) don't take over your music. For YouTube videos, the song and artist are
+  read from the video title.
 - **Mini island** while music plays: scrolling title and artist with a small progress wave, or the
   current **synced lyrics** (from [LRCLIB](https://lrclib.net)) with a karaoke sweep. Japanese lyrics
-  get **furigana** and **romaji**. Songs that only have plain lyrics show them line by line at an
+  get **furigana** and **romaji** (needs Japanese added in Windows: Settings > Time & language >
+  Language & region > Add a language). Songs that only have plain lyrics show them line by line at an
   estimated pace. Lyrics you've already played are kept on your PC, so they load instantly next time.
 - **Full lyrics page**: swipe to the third page of the list to see all the lyrics scrolling along with
   the song. Click a line to jump to it. Pin it to keep the island open, and turn furigana / romaji on or
@@ -72,7 +76,10 @@ that song.
 
 - Notifications are read only on your PC and never leave it.
 - When lyrics are on, the **title and artist** of what's playing are sent to lrclib.net to find the
-  lyrics (only the first time a song is played). Turn lyrics off to stop this.
+  lyrics (only the first time a song is played; for videos in a browser, only when the title looks like
+  a song). Turn lyrics off to stop this.
+- To show the app you can actually hear, the island reads how loud each app currently is (the same
+  levels as Windows' volume mixer). Nothing is recorded or sent anywhere.
 - Once a day the app reads the `VERSION` file and the list of version changes of this repository on
   GitHub to check for updates. To turn this off, set `"CheckUpdates": false` in
   `%LOCALAPPDATA%\MiniIsland\settings.json`. An update is only downloaded (from this repository) when you
