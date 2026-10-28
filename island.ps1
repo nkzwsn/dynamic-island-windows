@@ -9,7 +9,7 @@ try { if ((Get-Item $logFile -ErrorAction Stop).Length -gt 512KB) { Remove-Item 
 function Log($msg) { try { Add-Content -Path $logFile -Value ("{0:yyyy-MM-dd HH:mm:ss} {1}" -f (Get-Date), $msg) } catch {} }
 
 # Versi ini dibandingkan dengan file VERSION di GitHub untuk cek update
-$APP_VERSION = '1.2.0'
+$APP_VERSION = '1.2.1'
 $REPO_URL = 'https://github.com/nkzwsn/mini-island-windows'
 
 # Pengaturan yang diingat antar-restart (diatur lewat menu klik kanan)
@@ -659,12 +659,14 @@ $xaml = @'
     <Grid VerticalAlignment="Top">
     <!-- Cahaya samar warna album di belakang island selama lagu diputar (diam, tidak berkedip). Ukuran, sudut,
          geseran dan opacity-nya mengikuti island, jadi ikut menghilang saat island memudar. -->
+    <Grid x:Name="GlowWrap" VerticalAlignment="Top" IsHitTestVisible="False">
     <Border x:Name="Glow" VerticalAlignment="Top" IsHitTestVisible="False" Background="#00000000"
             Width="{Binding ActualWidth, ElementName=Island}" Height="{Binding ActualHeight, ElementName=Island}"
             CornerRadius="{Binding CornerRadius, ElementName=Island}" Opacity="{Binding Opacity, ElementName=Island}"
             RenderTransform="{Binding RenderTransform, ElementName=Island}">
       <Border.Effect><BlurEffect Radius="16" RenderingBias="Performance"/></Border.Effect>
     </Border>
+    </Grid>
     <Border x:Name="Island" Background="Black" CornerRadius="15" Width="120" Height="30" Opacity="0" IsHitTestVisible="False"
             BorderThickness="1" BorderBrush="#40FFFFFF" VerticalAlignment="Top" ClipToBounds="True">
       <Grid x:Name="IslandContent">
@@ -707,7 +709,7 @@ $island = $window.FindName('Island')
 $hotZone = $window.FindName('HotZone')
 $islandContent = $window.FindName('IslandContent')
 $handle = $window.FindName('Handle')
-$glow = $window.FindName('Glow'); $glow.Background = New-Object System.Windows.Media.SolidColorBrush([System.Windows.Media.Colors]::Transparent)
+$glowWrap = $window.FindName('GlowWrap'); $glow = $window.FindName('Glow'); $glow.Background = New-Object System.Windows.Media.SolidColorBrush([System.Windows.Media.Colors]::Transparent)
 $bubble = $window.FindName('Bubble'); $bubbleText = $window.FindName('BubbleText'); $bubbleGlyph = $window.FindName('BubbleGlyph')
 $sensorDots = $window.FindName('SensorDots'); $micDot = $window.FindName('MicDot'); $camDot = $window.FindName('CamDot')
 $views = @{}
@@ -755,7 +757,13 @@ function Show-View($name, [switch]$Replay) {
         $el = $views[$v]
         if ($v -eq $name) {
             $from = if ($Replay) { 0 } else { $null }
-            Animate $el ([System.Windows.UIElement]::OpacityProperty) 1 240 160 $from
+            Animate $el ([System.Windows.UIElement]::OpacityProperty) 1 340 120 $from
+            # Masuk sambil naik sedikit (daftar punya animasi geser sendiri)
+            if ($Replay -and $v -ne 'ListView') {
+                $tt = New-Object System.Windows.Media.TranslateTransform(0, 6)
+                $el.RenderTransform = $tt
+                Animate60 $tt ([System.Windows.Media.TranslateTransform]::YProperty) 6.0 0.0 420 120
+            }
             $el.IsHitTestVisible = $true
         } else {
             Animate $el ([System.Windows.UIElement]::OpacityProperty) 0 $script:viewFadeOutMs
@@ -833,9 +841,28 @@ function Set-Theme($c) {
     $ga = New-Object System.Windows.Media.Animation.ColorAnimation((Rgb $c.R $c.G $c.B $(if ($on) { $GLOW_ALPHA } else { 0 })), (New-Object System.Windows.Duration (Ms 650)))
     [System.Windows.Media.Animation.Timeline]::SetDesiredFrameRate($ga, $ANIM_FPS)
     $glow.Background.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty, $ga)
+    Set-GlowBreath $on
+}
+
+# Cahaya "bernapas": meredup dan menguat sangat pelan (6 detik per siklus) selama menyala. Saat dimatikan,
+# napasnya dihentikan halus supaya tidak ada animasi yang terus jalan di latar.
+$script:glowBreathing = $false
+function Set-GlowBreath($on) {
+    if ([bool]$on -eq $script:glowBreathing) { return }
+    $script:glowBreathing = [bool]$on
+    $op = [System.Windows.UIElement]::OpacityProperty
+    if ($on) {
+        $a = New-Object System.Windows.Media.Animation.DoubleAnimation(1.0, 0.35, (New-Object System.Windows.Duration ([TimeSpan]::FromSeconds(3))))
+        $a.AutoReverse = $true; $a.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
+        $e = New-Object System.Windows.Media.Animation.SineEase; $e.EasingMode = 'EaseInOut'; $a.EasingFunction = $e
+        [System.Windows.Media.Animation.Timeline]::SetDesiredFrameRate($a, $ANIM_FPS)
+        $glowWrap.BeginAnimation($op, $a)
+    } else {
+        Animate60 $glowWrap $op ([double]$glowWrap.Opacity) 1.0 650
+    }
 }
 # Kekuatan cahaya warna album (0-255): sengaja samar supaya tidak mengganggu
-$GLOW_ALPHA = 60
+$GLOW_ALPHA = 36
 
 # Garis tepi gaya kaca: pantulan terang di atas, menipis ke tengah, sedikit memantul lagi di dasar
 function New-GlassBorder {
@@ -1900,7 +1927,7 @@ function Open-Notif($n) {
 function Set-IslandVisible($visible) {
     $island.IsHitTestVisible = $visible
     $to = if ($visible) { 1 } else { 0 }
-    $ms = if ($visible) { 200 } else { 480 }
+    $ms = if ($visible) { 320 } else { 480 }
     Animate $island ([System.Windows.UIElement]::OpacityProperty) $to $ms
 }
 
@@ -2758,7 +2785,21 @@ function Set-NotifExpanded($on) {
     Resize-Island $WIDE_W $h $r
 }
 
-function Show-Notif($n) {
+$notifSwapTimer = New-Object System.Windows.Threading.DispatcherTimer
+$notifSwapTimer.Interval = Ms 170
+$notifSwapTimer.Add_Tick({
+    $notifSwapTimer.Stop()
+    $n = $script:pendingNotif; $script:pendingNotif = $null
+    if ($n -and $script:mode -eq 'notif') { Show-Notif $n -NoSwap }
+})
+function Show-Notif($n, [switch]$NoSwap) {
+    if (-not $NoSwap -and $script:mode -eq 'notif' -and $views['NotifView'].Opacity -gt 0.3) {
+        $script:pendingNotif = $n
+        $dismissTimer.Stop()
+        Animate $views['NotifView'] ([System.Windows.UIElement]::OpacityProperty) 0 160
+        $notifSwapTimer.Stop(); $notifSwapTimer.Start()
+        return
+    }
     $script:mode = 'notif'
     $script:current = $n
     # Sisa geseran dari pop-up yang ditarik sebelumnya
