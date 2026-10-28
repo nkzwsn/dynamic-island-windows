@@ -63,7 +63,7 @@ Double-click **`Uninstall.cmd`** (in the downloaded folder or in `%LOCALAPPDATA%
 - Timer (1-60 minutes) and stopwatch
 - Show: volume & brightness changes, charging & low battery, microphone / camera dots, Bluetooth
   headset, album color glow
-- Monitor, language, check for updates, quit
+- Monitor, language, check for updates, restart, quit
 
 **Lyric timing for one song**: scroll on the lyrics button of the music card. It is remembered for
 that song.

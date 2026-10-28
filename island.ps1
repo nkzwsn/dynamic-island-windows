@@ -9,7 +9,7 @@ try { if ((Get-Item $logFile -ErrorAction Stop).Length -gt 512KB) { Remove-Item 
 function Log($msg) { try { Add-Content -Path $logFile -Value ("{0:yyyy-MM-dd HH:mm:ss} {1}" -f (Get-Date), $msg) } catch {} }
 
 # Versi ini dibandingkan dengan file VERSION di GitHub untuk cek update
-$APP_VERSION = '1.2.1'
+$APP_VERSION = '1.2.2'
 $REPO_URL = 'https://github.com/nkzwsn/mini-island-windows'
 
 # Pengaturan yang diingat antar-restart (diatur lewat menu klik kanan)
@@ -87,6 +87,18 @@ public static class IslandNative {
     [DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
     [DllImport("user32.dll")] static extern bool GetCursorPos(out POINT p);
     public static int[] CursorPos() { POINT p; GetCursorPos(out p); return new int[] { p.X, p.Y }; }
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] struct DEVMODE {
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmDeviceName;
+        public short dmSpecVersion, dmDriverVersion, dmSize, dmDriverExtra; public int dmFields, x, y, dmDisplayOrientation, dmDisplayFixedOutput;
+        public short dmColor, dmDuplex, dmYResolution, dmTTOption, dmCollate;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmFormName;
+        public short dmLogPixels; public int dmBitsPerPel, dmPelsWidth, dmPelsHeight, dmDisplayFlags, dmDisplayFrequency; }
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern bool EnumDisplaySettings(string dev, int mode, ref DEVMODE dm);
+    // Refresh rate layar (Hz), 0 kalau tidak diketahui
+    public static int RefreshRate(string device) {
+        var d = new DEVMODE(); d.dmSize = (short)Marshal.SizeOf(typeof(DEVMODE));
+        return EnumDisplaySettings(device, -1, ref d) ? d.dmDisplayFrequency : 0;
+    }
     [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
     [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
@@ -272,6 +284,8 @@ public class IslandWave {
     readonly double knobHalf, h, baseY, taper, fadeIn, fullAt;
     readonly Stopwatch clock = Stopwatch.StartNew();
     double lastDraw = -1, frozenT = -1, lastX = -1;
+    // Jeda minimum antar gambar (detik); diatur island sesuai refresh rate layar
+    public static double FrameTime = 0.0155;
     bool hooked;
 
     public IslandWave(double h, double baseY, double scale, Color[] colors, TranslateTransform knob, double knobHalf) {
@@ -312,7 +326,7 @@ public class IslandWave {
         double W = Root.ActualWidth;
         double X = Math.Min(W, Math.Max(0, knob.X + knobHalf));
         double t;
-        if (Playing) { t = now; frozenT = -1; if (lastDraw >= 0 && now - lastDraw < 0.0155) return; }
+        if (Playing) { t = now; frozenT = -1; if (lastDraw >= 0 && now - lastDraw < FrameTime) return; }
         else { if (frozenT < 0) frozenT = now; t = frozenT; if (X == lastX && lastDraw >= 0) return; }
         lastDraw = now; lastX = X;
         // Lereng naik di awal bar dan turun menjelang titik sama panjang (bentuk simetris, tidak miring)
@@ -714,6 +728,9 @@ $bubble = $window.FindName('Bubble'); $bubbleText = $window.FindName('BubbleText
 $sensorDots = $window.FindName('SensorDots'); $micDot = $window.FindName('MicDot'); $camDot = $window.FindName('CamDot')
 $views = @{}
 foreach ($v in 'NotifView', 'ListView', 'MediaView', 'MiniView', 'ActivityView') { $views[$v] = $window.FindName($v) }
+# Teks yang terus bergerak (lirik, judul berjalan): digambar tanpa dikunci ke piksel, supaya geserannya
+# mulus per sub-piksel dan tidak meloncat 1 piksel tiap beberapa frame
+[System.Windows.Media.TextOptions]::SetTextHintingMode($views['MiniView'], [System.Windows.Media.TextHintingMode]::Animated)
 $mediaView = $views['MediaView']
 $nIconHost = $window.FindName('NIconHost'); $nTitle = $window.FindName('NTitle'); $nBody = $window.FindName('NBody'); $nApp = $window.FindName('NApp'); $nAppName = $window.FindName('NAppName')
 $listPanel = $views['ListView']
@@ -737,6 +754,7 @@ function Animate($el, $prop, $to, $ms, $delay = 0, $from = $null, $bouncy = $fal
     else { $e = New-Object System.Windows.Media.Animation.CubicEase }
     $e.EasingMode = 'EaseOut'
     $a.EasingFunction = $e
+    [System.Windows.Media.Animation.Timeline]::SetDesiredFrameRate($a, $ANIM_FPS)
     $el.BeginAnimation($prop, $a)
 }
 
@@ -1163,7 +1181,18 @@ function Poll-Flashes {
 # ---------- Now Playing (Spotify, YouTube di browser, dll) ----------
 $MEDIA_H = 60
 # Semua animasi di 60 fps (diset eksplisit untuk animasi yang berjalan terus dan pergantian baris)
+# Animasi mengikuti refresh rate layar island (mis. 100 fps di layar 100 Hz). Dikunci 60 fps di layar
+# yang lebih cepat dari 60 Hz membuat sebagian frame tampil dobel: gerakan jadi tersendat.
+function Update-AnimFps {
+    # WPF menggambar mengikuti layar tercepat/utama, bukan layar tempat island berada. Batas animasi
+    # diambil dari refresh tertinggi semua layar, supaya tiap frame layar mendapat posisi animasi baru.
+    $hz = 0
+    try { foreach ($sc in [System.Windows.Forms.Screen]::AllScreens) { $hz = [Math]::Max($hz, [IslandNative]::RefreshRate($sc.DeviceName)) } } catch {}
+    $script:ANIM_FPS = if ($hz -ge 50) { [Math]::Min(240, $hz + 20) } else { 60 }
+    [IslandWave]::FrameTime = 1.0 / $script:ANIM_FPS - 0.002
+}
 $ANIM_FPS = 60
+Update-AnimFps
 $script:mediaMgr = $null
 $script:media = $null
 $script:mediaTick = 0
@@ -2601,18 +2630,21 @@ function Set-MiniLyric($line, $pos, [switch]$Quiet) {
         return
     }
     $yp = [System.Windows.Media.TranslateTransform]::YProperty
+    # Baris/judul baru disusun dulu (beberapa ms), baru semua animasi dimulai bersamaan: kalau baris lama
+    # sudah mulai bergerak sebelum penyusunan, animasinya kehilangan frame (tersendat)
+    $tb = if ($line) { New-LyricText $line $pos } else { $null }
+    $mq = if (-not $line) { New-MiniMarquee } else { $null }
     $wasLyric = $false
     foreach ($old in @($h.Children)) {
         if ($old.Tag -eq 'out') { continue }
         if ($old.Name -ne 'marquee') { $wasLyric = $true }   # 'marquee' = judul berjalan + wave kecil
         $old.Tag = 'out'
-        Animate60 $old.RenderTransform $yp 0 -8 200
-        Animate60 $old ([System.Windows.UIElement]::OpacityProperty) $old.Opacity 0 150
+        Animate60 $old.RenderTransform $yp 0.0 -8.0 200
+        Animate60 $old ([System.Windows.UIElement]::OpacityProperty) ([double]$old.Opacity) 0.0 150
     }
     $lyricOutTimer.Stop(); $lyricOutTimer.Start()
     if (-not $line) {
         # Tanpa lirik: kembali ke pil kecil dengan judul & artis berjalan
-        $mq = New-MiniMarquee
         $mq.Opacity = 0
         [void]$h.Children.Add($mq)
         Animate60 $mq.RenderTransform $yp 8 0 320 120
@@ -2620,7 +2652,6 @@ function Set-MiniLyric($line, $pos, [switch]$Quiet) {
         Set-MiniSize $MINI_W $MINI_H
         return
     }
-    $tb = New-LyricText $line $pos
     $tb.Opacity = 0
     [void]$h.Children.Add($tb)
     # Baris baru langsung masuk (tanpa jeda) supaya pas dengan suara
@@ -3091,6 +3122,7 @@ function New-LyricsPage {
     $lines = @((Get-Lyrics) | Where-Object { $_.Text })
     $card = New-Object System.Windows.Controls.Border
     $card.Height = $LYRICS_PAGE_H; $card.ClipToBounds = $true
+    [System.Windows.Media.TextOptions]::SetTextHintingMode($card, [System.Windows.Media.TextHintingMode]::Animated)
     $card.CornerRadius = New-Object System.Windows.CornerRadius(14)
     $card.Background = Row-Brush $script:media.Accent $true
     $layers = New-Object System.Windows.Controls.Grid
@@ -4269,6 +4301,7 @@ function Build-Menu {
             $script:settings.Monitor = $s.Tag
             Save-Settings
             Update-Position
+            Update-AnimFps
         }
         $i = 1
         foreach ($sc in $screens) {
@@ -4291,6 +4324,7 @@ function Build-Menu {
     [void](Add-MI $lm (New-MI 'Bahasa Indonesia' 'id' $pickLang -Check -Checked ($script:settings.Language -eq 'id')))
     Add-Sep $menu
     [void](Add-MI $menu (New-MI (T 'Cek update' 'Check for updates') $null { Start-UpdateCheck -Manual }))
+    [void](Add-MI $menu (New-MI (T 'Muat ulang Island' 'Restart Island') $null { $script:restartCode = 3; Exit-Island }))
     [void](Add-MI $menu (New-MI (T 'Keluar dari Island' 'Quit Island') $null { Exit-Island }))
 }
 
@@ -4417,13 +4451,16 @@ $island.Add_SizeChanged({
 
 $island.Add_MouseEnter({
     $script:hovering = $true
+    $hoverWatch.Start()
     $closeTimer.Stop()
     if ($script:mode -eq 'notif') { $dismissTimer.Stop(); Set-NotifExpanded $true }
     elseif ($script:mode -eq 'media') { $dismissTimer.Stop() }
     elseif ($script:mode -eq 'activity') { $activityTimer.Stop() }
 })
-$island.Add_MouseLeave({
+$island.Add_MouseLeave({ On-IslandLeave })
+function On-IslandLeave {
     $script:hovering = $false
+    $hoverWatch.Stop()
     if ($script:mode -eq 'notif') { Set-NotifExpanded $false; $dismissTimer.Interval = Ms 2000; $dismissTimer.Start() }
     elseif ($script:mode -eq 'media') { $dismissTimer.Interval = Ms 2000; $dismissTimer.Start() }
     elseif ($script:mode -eq 'list') { $closeTimer.Start() }
@@ -4431,6 +4468,26 @@ $island.Add_MouseLeave({
         # Timer selesai tetap tampil cukup lama supaya terlihat
         $activityTimer.Interval = Ms $(if ($script:activity -and $script:activity.Kind -eq 'timerdone') { 5000 } else { 1500 })
         $activityTimer.Start()
+    }
+}
+
+# WPF kadang tidak mengirim MouseLeave (mis. setelah tombol di island diklik), sehingga island mengira
+# kursor masih di atasnya dan tidak pernah menutup. Selama kursor dianggap di atas island, posisinya
+# dicek sendiri; kalau ternyata sudah di luar, diperlakukan seperti MouseLeave biasa.
+$hoverWatch = New-Object System.Windows.Threading.DispatcherTimer
+$hoverWatch.Interval = Ms 250
+$hoverWatch.Add_Tick({
+    if (-not $script:hovering) { $hoverWatch.Stop(); return }
+    if ($menu.IsOpen -or [IslandNative]::MouseDown()) { return }
+    try {
+        $p = [IslandNative]::CursorPos()
+        $q = $island.PointFromScreen((New-Object System.Windows.Point($p[0], $p[1])))
+        $inside = $q.X -ge -2 -and $q.Y -ge -10 -and $q.X -le $island.ActualWidth + 2 -and $q.Y -le $island.ActualHeight + 2
+    } catch { $inside = $true }
+    if (-not $inside) {
+        # Tangkapan mouse yang tertinggal (tombol mouse sudah dilepas) juga dilepas
+        if ([System.Windows.Input.Mouse]::Captured) { [void][System.Windows.Input.Mouse]::Capture($null) }
+        On-IslandLeave
     }
 })
 $island.Add_MouseLeftButtonUp({
