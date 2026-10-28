@@ -9,7 +9,7 @@ try { if ((Get-Item $logFile -ErrorAction Stop).Length -gt 512KB) { Remove-Item 
 function Log($msg) { try { Add-Content -Path $logFile -Value ("{0:yyyy-MM-dd HH:mm:ss} {1}" -f (Get-Date), $msg) } catch {} }
 
 # Versi ini dibandingkan dengan file VERSION di GitHub untuk cek update
-$APP_VERSION = '1.3.1'
+$APP_VERSION = '1.3.2'
 $REPO_URL = 'https://github.com/nkzwsn/mini-island-windows'
 
 # Pengaturan yang diingat antar-restart (diatur lewat menu klik kanan)
@@ -160,6 +160,11 @@ public static class IslandNative {
     public static void SetTop(IntPtr h, bool top) {
         SetWindowPos(h, new IntPtr(top ? -1 : 1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010 | 0x0200);
     }
+
+    // Halaman memori yang sedang tidak dipakai dikembalikan ke Windows (yang dibutuhkan lagi dimuat ulang sendiri)
+    [DllImport("psapi.dll")] static extern bool EmptyWorkingSet(IntPtr h);
+    [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
+    public static void TrimMemory() { EmptyWorkingSet(GetCurrentProcess()); }
 }
 
 // Aplikasi yang sedang memakai mikrofon / kamera, dari catatan izin privasi Windows
@@ -5014,6 +5019,22 @@ $dismissTimer.Add_Tick({
     if ($n) { Show-Notif $n } else { Go-Idle }
 })
 
+# Memori: sampah .NET dibersihkan (termasuk objek besar) lalu halaman yang tidak terpakai dikembalikan ke Windows.
+# Hanya saat island tersembunyi, dan sekali setelah mulai (sisa kompilasi & pembuatan jendela); saat tampil
+# memorinya memang sedang dipakai. Task Manager turun dari ~130 MB ke ~20 MB, yang dibutuhkan lagi dimuat ulang
+# sendiri. Tanpa WaitForPendingFinalizers: di thread UI (STA) dengan banyak objek COM itu bisa tersendat.
+$script:lastCompact = [DateTime]::MinValue
+function Compact-Memory {
+    if (([DateTime]::UtcNow - $script:lastCompact).TotalSeconds -lt 60) { return }
+    $script:lastCompact = [DateTime]::UtcNow
+    [System.Runtime.GCSettings]::LargeObjectHeapCompactionMode = [System.Runtime.GCLargeObjectHeapCompactionMode]::CompactOnce
+    [GC]::Collect(2, [GCCollectionMode]::Forced, $true, $true)
+    try { [IslandNative]::TrimMemory() } catch { Log "trim: $_" }
+}
+$memTimer = New-Object System.Windows.Threading.DispatcherTimer
+$memTimer.Interval = [TimeSpan]::FromSeconds(15)
+$memTimer.Add_Tick({ $memTimer.Stop(); try { Compact-Memory } catch { Log "memory: $_" } })
+
 # Setelah island tersembunyi, buang isinya supaya animasi (equalizer) tidak terus berjalan di latar
 $cleanupTimer = New-Object System.Windows.Threading.DispatcherTimer
 $cleanupTimer.Interval = Ms 700
@@ -5025,6 +5046,8 @@ $cleanupTimer.Add_Tick({
     }
     # Mini island tersembunyi (tidak ada lirik) juga dikosongkan supaya equalizer-nya tidak jalan di latar
     if (-not $script:miniOn -or -not $script:miniVisible) { $views['MiniView'].Children.Clear() }
+    # Island benar-benar tersembunyi: memori yang tidak terpakai dikembalikan
+    if ($script:mode -eq 'idle' -and -not $script:miniOn) { try { Compact-Memory } catch { Log "memory: $_" } }
 })
 
 # Waktu lagu berjalan diperbarui tiap detik, hanya selama tampilan musik terbuka
@@ -5495,6 +5518,8 @@ $window.Add_Loaded({
     try { Check-Sensors } catch { Log "sensors: $_" }
     if ($script:settings.CheckUpdates) { Start-UpdateCheck }
     $pollTimer.Start()
+    # Sisa kompilasi kode C# dan pembuatan jendela saat mulai dibersihkan sekali
+    $memTimer.Start()
 })
 $window.Add_Closed({
     if ($script:flashWatcher) { $script:flashWatcher.Stop() }

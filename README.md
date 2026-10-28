@@ -41,7 +41,7 @@ and what's playing, instead of the toasts in the bottom-right corner.
 - **English or Indonesian** interface, and a choice of monitor if you have more than one.
 - Stays on top of other windows, but steps aside for fullscreen games and videos.
 - Light: well under 1% of your CPU when nothing is playing, about 2-3% while music plays (measured on a
-  6-core PC with a 180 Hz screen).
+  6-core PC with a 180 Hz screen), and about 45 MB of memory when idle.
 
 ## Install
 
