@@ -9,7 +9,7 @@ try { if ((Get-Item $logFile -ErrorAction Stop).Length -gt 512KB) { Remove-Item 
 function Log($msg) { try { Add-Content -Path $logFile -Value ("{0:yyyy-MM-dd HH:mm:ss} {1}" -f (Get-Date), $msg) } catch {} }
 
 # Versi ini dibandingkan dengan file VERSION di GitHub untuk cek update
-$APP_VERSION = '1.2.2'
+$APP_VERSION = '1.2.3'
 $REPO_URL = 'https://github.com/nkzwsn/mini-island-windows'
 
 # Pengaturan yang diingat antar-restart (diatur lewat menu klik kanan)
@@ -3049,7 +3049,7 @@ function Slide-ListIn($fromRight) {
 }
 
 # ---------- Halaman lirik penuh ----------
-# Seluruh lirik lagu bergulir sendiri: baris yang sedang dinyanyikan terang di sepertiga atas kartu,
+# Seluruh lirik lagu bergulir sendiri: baris yang sedang dinyanyikan terang di tengah kartu,
 # baris lain redup, tepi atas & bawah memudar. Klik satu baris = lompat ke bagian lagu itu.
 # Tombol di pojok kanan atas: pin (island tetap terbuka walau kursor pergi), dan untuk lirik Jepang
 # furigana & romaji. Furigana/romaji dihitung bertahap mulai dari baris yang sedang dinyanyikan,
@@ -3167,7 +3167,7 @@ function New-LyricsPage {
     # Tepi atas & bawah memudar (ukuran tetap setinggi kartu; daftar baris jauh lebih panjang dari kartu)
     $mask = New-Object System.Windows.Media.LinearGradientBrush
     $mask.MappingMode = 'Absolute'; $mask.StartPoint = '0,0'; $mask.EndPoint = "0,$LYRICS_PAGE_H"
-    foreach ($st in @(@(0, 0.0), @(255, 0.2), @(255, 0.78), @(0, 1.0))) {
+    foreach ($st in @(@(0, 0.0), @(255, 0.22), @(255, 0.78), @(0, 1.0))) {
         $mask.GradientStops.Add((New-Object System.Windows.Media.GradientStop((Rgb 0 0 0 $st[0]), $st[1])))
     }
     $fade.OpacityMask = $mask
@@ -3205,9 +3205,17 @@ function Measure-LyricsPage {
     $lp = $script:lyricsPage
     $lp.Panel.Measure((New-Object System.Windows.Size(($WIDE_W - 18), [double]::PositiveInfinity)))
     $tops = New-Object System.Collections.Generic.List[double]
+    $heights = New-Object System.Collections.Generic.List[double]
     $y = 0.0
-    foreach ($b in $lp.Blocks) { $tops.Add($y); $y += $b.DesiredSize.Height }
-    $lp.Tops = $tops
+    foreach ($b in $lp.Blocks) { $tops.Add($y); $heights.Add($b.DesiredSize.Height); $y += $b.DesiredSize.Height }
+    $lp.Tops = $tops; $lp.Heights = $heights
+}
+
+# Geseran supaya baris $idx tepat di tengah kartu (sebelum lirik mulai: baris pertama)
+function Get-LyricsPageTarget($lp, $idx) {
+    $i = [Math]::Max(0, $idx)
+    if ($i -ge $lp.Tops.Count) { return 0.0 }
+    $LYRICS_PAGE_H / 2 - ($lp.Tops[$i] + $lp.Heights[$i] / 2)
 }
 
 # Urutan baris yang furigana/romaji-nya dihitung: dari baris sekarang ke bawah, lalu ke atas
@@ -3239,8 +3247,7 @@ function Settle-LyricsPage {
     $lp = $script:lyricsPage
     if (-not $lp) { return }
     Measure-LyricsPage
-    $top = if ($lp.Cur -ge 0) { $lp.Tops[$lp.Cur] } else { 0.0 }
-    $target = [Math]::Min(0.0, $LYRICS_PAGE_H * 0.36 - $top - 12)
+    $target = Get-LyricsPageTarget $lp $lp.Cur
     Animate60 $lp.Shift ([System.Windows.Media.TranslateTransform]::YProperty) $lp.Shift.Y $target 380
 }
 
@@ -3265,9 +3272,8 @@ function Update-LyricsPage([switch]$Instant) {
         }
     }
     $lp.Cur = $idx
-    # Baris aktif di sepertiga atas; sebelum lirik mulai, baris pertama
-    $top = if ($idx -ge 0) { $lp.Tops[$idx] } else { 0.0 }
-    $target = [Math]::Min(0.0, $LYRICS_PAGE_H * 0.36 - $top - 12)
+    # Baris aktif di tengah kartu; sebelum lirik mulai, baris pertama
+    $target = Get-LyricsPageTarget $lp $idx
     $yp = [System.Windows.Media.TranslateTransform]::YProperty
     if ($Instant) { $lp.Shift.BeginAnimation($yp, $null); $lp.Shift.Y = $target }
     else { Animate60 $lp.Shift $yp $lp.Shift.Y $target 520 }
