@@ -9,7 +9,7 @@ try { if ((Get-Item $logFile -ErrorAction Stop).Length -gt 512KB) { Remove-Item 
 function Log($msg) { try { Add-Content -Path $logFile -Value ("{0:yyyy-MM-dd HH:mm:ss} {1}" -f (Get-Date), $msg) } catch {} }
 
 # Versi ini dibandingkan dengan file VERSION di GitHub untuk cek update
-$APP_VERSION = '1.3.0'
+$APP_VERSION = '1.3.1'
 $REPO_URL = 'https://github.com/nkzwsn/mini-island-windows'
 
 # Pengaturan yang diingat antar-restart (diatur lewat menu klik kanan)
@@ -17,9 +17,11 @@ $settingsFile = Join-Path $here 'settings.json'
 # LyricDelay: lirik ditampilkan sekian detik setelah waktu di file lirik. Posisi yang dilaporkan pemutar
 # sedikit mendahului suara yang terdengar (buffer audio, headset Bluetooth), jadi bawaannya sedikit ditunda.
 # Monitor: nama perangkat layar (kosong = layar utama). Language: 'id' / 'en'.
+# AppVolume: slider volume kartu musik mengatur volume aplikasi pemutarnya saja, bukan volume utama Windows.
 $script:settings = [PSCustomObject]@{
     Lyrics = $true; Romaji = $true; Furigana = $true; LyricDelay = 0.15; Language = ''; Monitor = ''
     VolumeOsd = $true; Charging = $true; MicCam = $true; Headset = $true; Glow = $true; CheckUpdates = $true; SkipVersion = ''; NotifiedVersion = ''
+    AppVolume = $true
 }
 try {
     if (Test-Path $settingsFile) {
@@ -44,6 +46,9 @@ function Save-Settings {
 }
 # Teks antarmuka sesuai bahasa yang dipilih: T 'Indonesia' 'English'
 function T($id, $en) { if ($script:settings.Language -eq 'en') { $en } else { $id } }
+# Angka desimal mengikuti bahasa antarmuka (0,1 untuk Indonesia, 0.1 untuk Inggris), bukan pengaturan regional Windows
+$CULTURE_ID = [Globalization.CultureInfo]::GetCultureInfo('id-ID')
+function Fmt($fmt, $v) { [string]::Format($(if ($script:settings.Language -eq 'en') { [Globalization.CultureInfo]::InvariantCulture } else { $CULTURE_ID }), $fmt, $v) }
 
 # Nama mutex dari nama lama (Dynamic Island) sengaja dipertahankan: versi lama dan baru tidak bisa jalan bersamaan
 $mutex = New-Object System.Threading.Mutex($false, 'Local\DynamicIslandNotif')
@@ -287,8 +292,16 @@ public class IslandWave {
     // Jeda minimum antar gambar (detik); diatur island sesuai refresh rate layar
     public static double FrameTime = 0.0155;
     bool hooked;
+    // Tinggi tiap lapis terhadap garis luar bersama, dan wadah garis luar itu (dipakai ulang tiap frame)
+    static readonly double[] nest = { 1.0, 0.70, 0.45 };
+    double[] prof = new double[0];
+    // Satu pola bukit (0..1) lapis j di posisi x pada waktu t
+    double Wave(double x, double t, int j) { return (1 - Math.Cos(2 * Math.PI * (x - speeds[j] * t + shifts[j]) / lens[j])) / 2; }
+    // Maksimum dua nilai dengan sudut yang dibulatkan selebar k (polynomial smooth max)
+    static double SMax(double a, double b, double k) { double d = Math.Max(k - Math.Abs(a - b), 0) / k; return Math.Max(a, b) + d * d * k * 0.25; }
 
-    public IslandWave(double h, double baseY, double scale, Color[] colors, TranslateTransform knob, double knobHalf) {
+    // ampScale: tinggi bukit saja (kartu musik sedikit lebih tinggi dari versi kecil di mini island)
+    public IslandWave(double h, double baseY, double scale, double ampScale, Color[] colors, TranslateTransform knob, double knobHalf) {
         this.h = h; this.baseY = baseY; this.knob = knob; this.knobHalf = knobHalf;
         // Naik landai di awal bar dan turun landai menjelang titik (bukan tebing)
         taper = 50 * scale; fadeIn = 50 * scale; fullAt = 90 * scale;
@@ -296,7 +309,7 @@ public class IslandWave {
         lens = new[] { 170 * scale, 124 * scale, 92 * scale };
         // Pangkat 1 = gelombang sinus murni (puncak bulat). Pangkat > 1 membuat puncak runcing.
         pows = new[] { 1.0, 1.0, 1.0 };
-        amps = new[] { 11.0 * scale, 8.5 * scale, 6.5 * scale };
+        amps = new[] { 11.0 * scale * ampScale, 8.5 * scale * ampScale, 6.5 * scale * ampScale };
         // Semua lapis mengalir sama cepat (beda kecepatan membuat bentuknya acak dan janggal)
         speeds = new[] { 22.0 * scale, 22.0 * scale, 22.0 * scale };
         shifts = new[] { 0.0, 47 * scale, 21 * scale };
@@ -305,12 +318,15 @@ public class IslandWave {
         Root.Height = h; Root.ClipToBounds = true; Root.IsHitTestVisible = false;
         paths = new Path[3];
         for (int i = 0; i < 3; i++) {
+            // Gradasi satu warna per lapis: puncak bukit = warna lapisnya yang lebih terang, kakinya = warna itu
+            // sendiri yang memudar ke arah bar (gradasi antar dua warna berbeda menghasilkan warna keruh)
             var c = colors[i];
+            var hi = Color.FromArgb(225, (byte)(c.R + (255 - c.R) * 0.4), (byte)(c.G + (255 - c.G) * 0.4), (byte)(c.B + (255 - c.B) * 0.4));
             var fill = new LinearGradientBrush();
             fill.MappingMode = BrushMappingMode.Absolute;
             fill.StartPoint = new Point(0, baseY - amps[i]); fill.EndPoint = new Point(0, baseY);
-            fill.GradientStops.Add(new GradientStop(Color.FromArgb(215, c.R, c.G, c.B), 0));
-            fill.GradientStops.Add(new GradientStop(Color.FromArgb(125, c.R, c.G, c.B), 1));
+            fill.GradientStops.Add(new GradientStop(hi, 0));
+            fill.GradientStops.Add(new GradientStop(Color.FromArgb(120, c.R, c.G, c.B), 1));
             fill.Freeze();
             paths[i] = new Path { Fill = fill };
             Root.Children.Add(paths[i]);
@@ -334,20 +350,26 @@ public class IslandWave {
         // Tinggi gelombang dibatasi panjang bar (maks ~11% panjangnya): bar pendek di awal lagu dapat
         // gelombang rendah, jadi tidak membentuk gundukan/segitiga bersisi curam
         double grow = Math.Min(1.0, X * 0.11 / Math.Max(1, amps[0]));
+        // Garis luar = gabungan ketiga bukit, dengan sudut di persilangannya dibulatkan (smooth max), lalu ketiga
+        // lapis digambar bersarang di dalamnya (100% / 70% / 45%): tidak ada tepi yang bersilangan atau bersudut
+        int n = (int)Math.Ceiling(X);
+        if (prof.Length < n + 1) prof = new double[n + 64];
+        double a0 = grow * amps[0] * (0.72 + 0.28 * Math.Sin(t * breathW[0] + breathP[0]));
+        double a1 = grow * amps[1] * (0.72 + 0.28 * Math.Sin(t * breathW[1] + breathP[1]));
+        double a2 = grow * amps[2] * (0.72 + 0.28 * Math.Sin(t * breathW[2] + breathP[2]));
+        double k = Math.Max(0.5, 0.4 * a0);
+        for (int j = 0; j <= n; j++) {
+            double x = Math.Min(j, X);
+            double env = Smooth(x / fin) * Smooth((X - x) / tap);
+            // Lembah tidak sampai ke bar (minimal 30% tinggi), jadi tidak ada celah kosong di antara bukit
+            double h0 = a0 * (0.3 + 0.7 * Wave(x, t, 0)), h1 = a1 * (0.3 + 0.7 * Wave(x, t, 1)), h2 = a2 * (0.3 + 0.7 * Wave(x, t, 2));
+            prof[j] = env * SMax(SMax(h0, h1, k), h2, k);
+        }
         for (int i = 0; i < 3; i++) {
             var g = new StreamGeometry();
             using (var ctx = g.Open()) {
                 ctx.BeginFigure(new Point(0, h), true, true);
-                double amp = grow * amps[i] * (0.72 + 0.28 * Math.Sin(t * breathW[i] + breathP[i]));
-                for (double x = 0; ; x += 1.0) {
-                    if (x > X) x = X;
-                    double c = (1 - Math.Cos(2 * Math.PI * (x - speeds[i] * t + shifts[i]) / lens[i])) / 2;
-                    double env = Smooth(x / fin) * Smooth((X - x) / tap);
-                    // Lembah tidak sampai ke bar (minimal 30% tinggi), jadi tidak ada celah kosong di antara bukit
-                    double f = 0.3 + 0.7 * Math.Pow(c, pows[i]);
-                    ctx.LineTo(new Point(x, baseY - amp * env * f), true, true);
-                    if (x >= X) break;
-                }
+                for (int j = 0; j <= n; j++) ctx.LineTo(new Point(Math.Min(j, X), baseY - prof[j] * nest[i]), true, true);
                 ctx.LineTo(new Point(X, h), true, false);
             }
             g.Freeze();
@@ -441,34 +463,34 @@ using System.Windows.Threading;
 public interface IAudioEndpointVolumeCallback { [PreserveSig] int OnNotify(IntPtr data); }
 [Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown), ComImport]
 interface IAudioEndpointVolume {
-    int RegisterControlChangeNotify(IntPtr p); int UnregisterControlChangeNotify(IntPtr p);
-    int GetChannelCount(out uint c);
-    int SetMasterVolumeLevel(float level, ref Guid ctx);
-    int SetMasterVolumeLevelScalar(float level, ref Guid ctx);
-    int GetMasterVolumeLevel(out float level);
-    int GetMasterVolumeLevelScalar(out float level);
-    int SetChannelVolumeLevel(uint ch, float level, ref Guid ctx);
-    int SetChannelVolumeLevelScalar(uint ch, float level, ref Guid ctx);
-    int GetChannelVolumeLevel(uint ch, out float level);
-    int GetChannelVolumeLevelScalar(uint ch, out float level);
-    int SetMute([MarshalAs(UnmanagedType.Bool)] bool mute, ref Guid ctx);
-    int GetMute([MarshalAs(UnmanagedType.Bool)] out bool mute);
+    [PreserveSig] int RegisterControlChangeNotify(IntPtr p); [PreserveSig] int UnregisterControlChangeNotify(IntPtr p);
+    int GetChannelCount();
+    int SetMasterVolumeLevel();
+    [PreserveSig] int SetMasterVolumeLevelScalar(float level, ref Guid ctx);
+    int GetMasterVolumeLevel();
+    [PreserveSig] int GetMasterVolumeLevelScalar(out float level);
+    int SetChannelVolumeLevel(); int SetChannelVolumeLevelScalar(); int GetChannelVolumeLevel(); int GetChannelVolumeLevelScalar();
+    [PreserveSig] int SetMute([MarshalAs(UnmanagedType.Bool)] bool mute, ref Guid ctx);
+    [PreserveSig] int GetMute([MarshalAs(UnmanagedType.Bool)] out bool mute);
 }
 [Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown), ComImport]
 interface IMMDevice {
-    int Activate(ref Guid iid, int clsCtx, IntPtr p, [MarshalAs(UnmanagedType.IUnknown)] out object o);
-    int OpenPropertyStore(int access, out IntPtr props);
-    int GetId([MarshalAs(UnmanagedType.LPWStr)] out string id);
+    [PreserveSig] int Activate(ref Guid iid, int clsCtx, IntPtr p, [MarshalAs(UnmanagedType.IUnknown)] out object o);
+    int OpenPropertyStore();
+    [PreserveSig] int GetId([MarshalAs(UnmanagedType.LPWStr)] out string id);
 }
 [Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown), ComImport]
-interface IMMDeviceEnumerator { int NotImpl1(); int GetDefaultAudioEndpoint(int dataFlow, int role, out IMMDevice dev); }
-[ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")] class MMDeviceEnumeratorCom {}
+interface IMMDeviceEnumerator { int NotImpl1(); [PreserveSig] int GetDefaultAudioEndpoint(int dataFlow, int role, out IMMDevice dev); }
 public static class SysVolume {
     // Perubahan dari slider island sendiri ditandai dengan konteks ini (tidak perlu pop-up volume)
     public static readonly Guid Own = new Guid("6C1E3F3A-5B7D-4D8E-9C21-1A2B3C4D5E6F");
+    // Enumerator perangkat audio satu objek bersama untuk seluruh proses (AppAudio juga memakainya): dibuat
+    // lewat CLSID dan langsung di-cast ke interface. Cast ke kelas pembungkus sendiri gagal kalau objeknya
+    // sudah lebih dulu dibungkus kelas lain.
+    static readonly Type enumType = Type.GetTypeFromCLSID(new Guid("BCDE0395-E52F-467C-8E3D-C4579291692E"));
     // Perangkat default diambil ulang tiap kali, jadi tetap benar kalau output pindah (mis. ke headset)
     internal static IMMDevice Device() {
-        var en = (IMMDeviceEnumerator)new MMDeviceEnumeratorCom(); IMMDevice dev;
+        var en = (IMMDeviceEnumerator)Activator.CreateInstance(enumType); IMMDevice dev;
         Marshal.ThrowExceptionForHR(en.GetDefaultAudioEndpoint(0, 1, out dev));
         return dev;
     }
@@ -521,8 +543,9 @@ public class VolumeWatcher : IAudioEndpointVolumeCallback {
     }
 }
 '@
-# Suara per aplikasi (puncak level tiap sesi audio di semua perangkat output aktif). Dipakai untuk memilih
-# pemutar yang benar-benar bersuara: video bisu di browser tetap melapor "Playing" ke Windows.
+# Suara per aplikasi (sesi audio di semua perangkat output aktif): puncak level untuk memilih pemutar yang
+# benar-benar bersuara (video bisu di browser tetap melapor "Playing" ke Windows), dan volume/bisu per
+# aplikasi untuk slider volume kartu musik.
 Add-IslandType @'
 using System;
 using System.Collections.Generic;
@@ -547,6 +570,11 @@ interface IAaSessionControl2 {
 }
 [Guid("C02216F6-8C67-4B5B-9D00-D008E73E0064"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown), ComImport]
 interface IAaMeter { [PreserveSig] int GetPeakValue(out float peak); }
+[Guid("87CE5498-68D6-44E5-9215-6DA47EF883D8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown), ComImport]
+interface IAaSimpleVolume {
+    [PreserveSig] int SetMasterVolume(float level, ref Guid ctx); [PreserveSig] int GetMasterVolume(out float level);
+    [PreserveSig] int SetMute([MarshalAs(UnmanagedType.Bool)] bool mute, ref Guid ctx); [PreserveSig] int GetMute([MarshalAs(UnmanagedType.Bool)] out bool mute);
+}
 public static class AppAudio {
     // Enumerator perangkat audio dipakai bersama satu proses dan SysVolume sudah membungkusnya dengan kelasnya
     // sendiri: dibuat lewat CLSID dan langsung di-cast ke interface (cast ke kelas lain akan gagal)
@@ -555,10 +583,11 @@ public static class AppAudio {
     [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern int GetPackageFamilyName(IntPtr h, ref uint len, StringBuilder name);
     static readonly Dictionary<uint, string[]> keys = new Dictionary<uint, string[]>();
-    // Puncak level (0..1) per aplikasi. Kunci: nama proses, dan untuk aplikasi Store juga nama keluarga
-    // paketnya (= awalan AUMID sesi media, mis. AppleInc.AppleMusicWin_nzyj5cx40ttqa)
-    public static Dictionary<string, float> Peaks() {
-        var r = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
+    static Guid ctx = new Guid("3D1F7A52-8C4B-4E6A-B1D9-5F2E0C7A9B41");
+
+    // Semua sesi audio (PID + sesinya) di semua perangkat output aktif
+    static List<KeyValuePair<uint, IAaSessionControl2>> Sessions() {
+        var r = new List<KeyValuePair<uint, IAaSessionControl2>>();
         var en = (IAaDeviceEnumerator)Activator.CreateInstance(enumType);
         IAaDeviceCollection devs; int nd;
         if (en.EnumAudioEndpoints(0, 1, out devs) != 0 || devs.GetCount(out nd) != 0) return r;   // eRender, aktif
@@ -570,17 +599,71 @@ public static class AppAudio {
                 if (((IAaSessionManager2)o).GetSessionEnumerator(out se) != 0 || se.GetCount(out n) != 0) continue;
                 for (int i = 0; i < n; i++) {
                     try {
-                        IAaSessionControl2 s; uint pid; float peak;
+                        IAaSessionControl2 s; uint pid;
                         if (se.GetSession(i, out s) != 0) continue;
                         s.GetProcessId(out pid);
-                        if (pid == 0 || ((IAaMeter)s).GetPeakValue(out peak) != 0) continue;
-                        foreach (var k in Keys(pid)) { float v; if (!r.TryGetValue(k, out v) || peak > v) r[k] = peak; }
+                        if (pid != 0) r.Add(new KeyValuePair<uint, IAaSessionControl2>(pid, s));
                     } catch { }
                 }
             } catch { }
         }
+        // Proses yang tidak punya sesi audio lagi dilupakan: PID-nya bisa dipakai ulang oleh proses lain
+        var live = new Dictionary<uint, bool>();
+        foreach (var s in r) live[s.Key] = true;
+        foreach (var p in new List<uint>(keys.Keys)) if (!live.ContainsKey(p)) keys.Remove(p);
         return r;
     }
+
+    // Puncak level (0..1) per aplikasi. Kunci: nama proses, dan untuk aplikasi Store juga nama keluarga
+    // paketnya (= awalan AUMID sesi media, mis. AppleInc.AppleMusicWin_nzyj5cx40ttqa)
+    public static Dictionary<string, float> Peaks() {
+        var r = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
+        foreach (var s in Sessions()) {
+            try {
+                float peak;
+                if (((IAaMeter)s.Value).GetPeakValue(out peak) != 0) continue;
+                foreach (var k in Keys(s.Key)) { float v; if (!r.TryGetValue(k, out v) || peak > v) r[k] = peak; }
+            } catch { }
+        }
+        return r;
+    }
+
+    // Volume satu aplikasi = volume sesi-sesi audionya (yang diatur volume mixer Windows). Daftar sesinya
+    // disimpan 2 detik: slider yang sedang digeser memanggil ini puluhan kali per detik.
+    static string volKey; static List<IAaSimpleVolume> volList; static DateTime volAt;
+    static List<IAaSimpleVolume> Volumes(string key) {
+        if (key == volKey && volList != null && (DateTime.UtcNow - volAt).TotalSeconds < 2) return volList;
+        var list = new List<IAaSimpleVolume>();
+        foreach (var s in Sessions()) {
+            foreach (var k in Keys(s.Key)) {
+                if (!string.Equals(k, key, StringComparison.OrdinalIgnoreCase)) continue;
+                try { list.Add((IAaSimpleVolume)s.Value); } catch { }
+                break;
+            }
+        }
+        volKey = key; volList = list; volAt = DateTime.UtcNow;
+        return list;
+    }
+    // Volume aplikasi (0..1), atau -1 kalau aplikasinya belum punya sesi audio (belum pernah bersuara)
+    public static float GetVolume(string key) {
+        float best = -1;
+        foreach (var v in Volumes(key)) { float l; try { if (v.GetMasterVolume(out l) == 0 && l > best) best = l; } catch { } }
+        return best;
+    }
+    public static void SetVolume(string key, float level) {
+        level = Math.Max(0f, Math.Min(1f, level));
+        foreach (var v in Volumes(key)) { try { v.SetMasterVolume(level, ref ctx); } catch { } }
+    }
+    // Bisu kalau semua sesinya dibisukan
+    public static bool GetMute(string key) {
+        bool any = false;
+        foreach (var v in Volumes(key)) { bool m; try { if (v.GetMute(out m) != 0) continue; if (!m) return false; any = true; } catch { } }
+        return any;
+    }
+    public static void SetMute(string key, bool mute) {
+        foreach (var v in Volumes(key)) { try { v.SetMute(mute, ref ctx); } catch { } }
+    }
+
     static string[] Keys(uint pid) {
         string[] k;
         if (keys.TryGetValue(pid, out k)) return k;
@@ -591,9 +674,9 @@ public static class AppAudio {
             try { uint len = 256; var sb = new StringBuilder(256); if (GetPackageFamilyName(h, ref len, sb) == 0) list.Add(sb.ToString()); }
             finally { CloseHandle(h); }
         }
-        // PID bisa dipakai ulang oleh proses lain: cache dikosongkan sesekali
-        if (keys.Count > 300) keys.Clear();
-        k = list.ToArray(); keys[pid] = k;
+        // Gagal dibaca (mis. proses baru saja keluar): tidak disimpan, dicoba lagi lain kali
+        k = list.ToArray();
+        if (k.Length > 0) keys[pid] = k;
         return k;
     }
 }
@@ -756,6 +839,10 @@ $xaml = @'
             CornerRadius="{Binding CornerRadius, ElementName=Island}" Opacity="{Binding Opacity, ElementName=Island}"
             RenderTransform="{Binding RenderTransform, ElementName=Island}">
       <Border.Effect><BlurEffect Radius="16" RenderingBias="Performance"/></Border.Effect>
+      <!-- Hasil blur disimpan sebagai bitmap: jendela transparan digambar ulang seluruhnya tiap ada animasi
+           (gelombang, equalizer), dan tanpa cache cahaya ini ikut di-blur ulang 60 kali per detik
+           (sekitar 40% dari CPU island saat lagu diputar). Napasnya (opacity) tidak membuat cache dibuat ulang. -->
+      <Border.CacheMode><BitmapCache/></Border.CacheMode>
     </Border>
     </Grid>
     <Border x:Name="Island" Background="Black" CornerRadius="15" Width="120" Height="30" Opacity="0" IsHitTestVisible="False"
@@ -906,7 +993,8 @@ function Get-Accent($icon, $key) {
         $hex = $PALETTE[("$key".GetHashCode() -band 0x7FFFFFFF) % $PALETTE.Count]
         $c = [System.Windows.Media.ColorConverter]::ConvertFromString($hex)
     }
-    $accentCache[$key] = $c
+    # Tanpa ikon (mungkin hanya sementara gagal dibaca) warna cadangan tidak disimpan: ikon berikutnya dihitung ulang
+    if ($icon) { $accentCache[$key] = $c }
     $c
 }
 
@@ -950,7 +1038,7 @@ function Set-GlowBreath($on) {
         $a = New-Object System.Windows.Media.Animation.DoubleAnimation(1.0, 0.35, (New-Object System.Windows.Duration ([TimeSpan]::FromSeconds(3))))
         $a.AutoReverse = $true; $a.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
         $e = New-Object System.Windows.Media.Animation.SineEase; $e.EasingMode = 'EaseInOut'; $a.EasingFunction = $e
-        [System.Windows.Media.Animation.Timeline]::SetDesiredFrameRate($a, $ANIM_FPS)
+        [System.Windows.Media.Animation.Timeline]::SetDesiredFrameRate($a, $AMBIENT_FPS)
         $glowWrap.BeginAnimation($op, $a)
     } else {
         Animate60 $glowWrap $op ([double]$glowWrap.Opacity) 1.0 650
@@ -1088,13 +1176,16 @@ function Get-AppIcon($un, $aumid) {
     if (-not $bmp -and $aumid) {
         try { $s = [IslandShell]::Icon("shell:AppsFolder\$aumid", 64); if ($s) { $bmp = Trim-Bitmap $s } } catch {}
     }
-    $iconCache[$aumid] = $bmp
+    # Gagal (bisa sementara, mis. sistem sibuk) tidak disimpan: dicoba lagi pada notifikasi berikutnya
+    if ($bmp) { $iconCache[$aumid] = $bmp }
     $bmp
 }
 
 # Foto pengirim (avatar di notifikasi Discord, WhatsApp, Chrome, dll): gambar "appLogoOverride" di XML
-# notifikasinya. Berkas lokal atau alamat web; $null kalau tidak ada.
-function Get-ToastPhoto($id) {
+# notifikasinya. Berkas lokal atau alamat web; $null kalau tidak ada. Foto dari web disimpan per alamat
+# (pengirim yang sama tidak diunduh ulang); -NoNet: jangan menunggu jaringan sama sekali.
+$photoCache = @{}
+function Get-ToastPhoto($id, [switch]$NoNet) {
     $xml = $null
     try { $xml = [IslandWpn]::Payload([long]$id) } catch { Log "toast xml: $_" }
     if (-not $xml) { return $null }
@@ -1105,7 +1196,10 @@ function Get-ToastPhoto($id) {
         if (-not $img) { return $null }
         $src = $img.GetAttribute('src')
         $bytes = $null
-        if ($src -match '^https?://') {
+        $web = $src -match '^https?://'
+        if ($web) {
+            if ($photoCache.ContainsKey($src)) { return $photoCache[$src] }
+            if ($NoNet) { return $null }
             # Ditunggu sebentar saja supaya island tidak tersendat kalau jaringan lambat
             $t = $http.GetByteArrayAsync($src)
             if ($t.Wait(1500)) { $bytes = $t.Result }
@@ -1118,13 +1212,19 @@ function Get-ToastPhoto($id) {
         $bi.BeginInit(); $bi.CacheOption = 'OnLoad'; $bi.DecodePixelWidth = 96
         $bi.StreamSource = New-Object System.IO.MemoryStream(, $bytes)
         $bi.EndInit(); $bi.Freeze()
+        if ($web) {
+            if ($photoCache.Count -gt 100) { $photoCache.Clear() }
+            $photoCache[$src] = $bi
+        }
         $bi
     } catch { Log "toast photo: $_"; $null }
 }
 
 function Convert-Notif($un) {
     $app = ''; $aumid = ''
-    try { $app = $un.AppInfo.DisplayInfo.DisplayName; $aumid = $un.AppInfo.AppUserModelId } catch {}
+    # Dibaca terpisah: DisplayInfo bisa gagal untuk sebagian aplikasi, AUMID-nya tetap dibutuhkan (ikon, klik untuk membuka)
+    try { $aumid = $un.AppInfo.AppUserModelId } catch {}
+    try { $app = $un.AppInfo.DisplayInfo.DisplayName } catch {}
     $texts = @()
     try {
         $binding = $un.Notification.Visual.GetBinding([Windows.UI.Notifications.KnownNotificationBindings]::ToastGeneric)
@@ -1141,7 +1241,8 @@ function Convert-Notif($un) {
         Body   = $body
         Time   = $un.CreationTime.LocalDateTime
         Icon   = $icon
-        Photo  = (Get-ToastPhoto $un.Id)
+        # Notifikasi lama saat island baru mulai tidak menunggu unduhan foto (bisa puluhan, di thread UI)
+        Photo  = (Get-ToastPhoto $un.Id -NoNet:(-not $script:notifsSeeded))
         Accent = (Get-Accent $icon $(if ($aumid) { $aumid } else { $app }))
     }
 }
@@ -1155,11 +1256,14 @@ function Poll {
             $id = $un.Id
             $present[$id] = $true
             if (-not $notifCache.ContainsKey($id)) { $notifCache[$id] = Convert-Notif $un }
-            if ($seen.Add($id) -and $script:initialized) { $fresh += $notifCache[$id] }
+            if ($seen.Add($id) -and $script:notifsSeeded) { $fresh += $notifCache[$id] }
         }
         foreach ($k in @($notifCache.Keys)) { if (-not $present.ContainsKey($k)) { $notifCache.Remove($k) } }
         foreach ($n in ($fresh | Sort-Object Time)) { Enqueue-Notif $n }
         Merge-Recent
+        # Notifikasi yang sudah ada saat island mulai bukan notifikasi baru: yang baru dihitung setelah daftar
+        # pertama berhasil dibaca (kalau pembacaan pertama gagal, notifikasi lama tidak ikut muncul sebagai pop-up)
+        $script:notifsSeeded = $true
     } catch { Log "poll: $_" }
     try { Poll-Flashes } catch { Log "flash: $_" }
     try { Poll-Media } catch { Log "media: $_" }
@@ -1183,7 +1287,7 @@ function Enqueue-Notif($n) {
 function Next-Queued {
     while ($queue.Count -gt 0) {
         $n = $queue.Dequeue()
-        if ($n.Exe -or $n.Kind -or $notifCache.ContainsKey($n.Id)) { return $n }
+        if ($n.Flash -or $n.Kind -or $notifCache.ContainsKey($n.Id)) { return $n }
     }
     $null
 }
@@ -1255,6 +1359,8 @@ function Poll-Flashes {
             Id     = $script:flashId
             App    = $name
             Aumid  = ''
+            # Penanda notifikasi kedipan taskbar (Exe bisa kosong kalau path-nya tidak bisa dibaca, mis. WeChat admin)
+            Flash  = $true
             Exe    = $exe
             Title  = (T 'Pesan baru' 'New message')
             Body   = (T "Buka $name untuk membaca" "Open $name to read it")
@@ -1276,9 +1382,14 @@ function Update-AnimFps {
     $hz = 0
     try { foreach ($sc in [System.Windows.Forms.Screen]::AllScreens) { $hz = [Math]::Max($hz, [IslandNative]::RefreshRate($sc.DeviceName)) } } catch {}
     $script:ANIM_FPS = if ($hz -ge 50) { [Math]::Min(240, $hz + 20) } else { 60 }
-    [IslandWave]::FrameTime = 1.0 / $script:ANIM_FPS - 0.002
+    [IslandWave]::FrameTime = 1.0 / [Math]::Min($script:ANIM_FPS, $AMBIENT_FPS) - 0.002
 }
 $ANIM_FPS = 60
+# Animasi yang berjalan terus selama lagu diputar (gelombang, equalizer, judul berjalan, sapuan lirik, napas
+# cahaya) cukup 60 fps: geraknya pelan, jadi di layar 144-240 Hz tampak sama halusnya. Jendela island transparan
+# digambar ulang oleh CPU tiap frame, jadi animasi terus-menerus di ~200 fps memakan hampir setengah inti CPU.
+# Transisi singkat (buka/tutup, ganti ukuran, ganti warna) tetap mengikuti refresh rate layar.
+$AMBIENT_FPS = 60
 Update-AnimFps
 $script:mediaMgr = $null
 $script:media = $null
@@ -1286,7 +1397,7 @@ $script:mediaTick = 0
 $script:mediaForce = $false
 $script:pendingMediaPopup = $false
 $script:progressBars = @()
-# Pemutar di browser (YouTube, YouTube Music): cover datang terlambat, judul video perlu diurai (Get-SongQuery)
+# Pemutar di browser (YouTube, YouTube Music): judul video perlu diurai (Get-SongQuery), video bisu diabaikan (Poll-Media)
 $BROWSER_APP = '(?i)chrome|msedge|edge|firefox|308046B0AF4A39CB|brave|opera|vivaldi'
 
 # Kapan tiap aplikasi terakhir terdengar bersuara (kunci = nama proses / keluarga paket Store)
@@ -1300,6 +1411,8 @@ function Update-AppAudio {
 # browser -> nama prosesnya (aplikasi web terpasang memakai AUMID browsernya, mis. Chrome._crx_...)
 function Get-AppAudioKey($aumid) {
     if ($aumid -match '^([^!]+_[a-z0-9]{13})!') { return $matches[1] }
+    # Sebagian pemutar memakai path lengkap exe-nya sebagai AUMID (C:\...\foobar2000.exe)
+    if ($aumid -match '\\') { return [IO.Path]::GetFileNameWithoutExtension($aumid) }
     switch -regex ($aumid) {
         '^chrome' { return 'chrome' }
         '^msedge' { return 'msedge' }
@@ -1308,6 +1421,15 @@ function Get-AppAudioKey($aumid) {
     }
     $aumid -replace '\.exe$', ''
 }
+# Sesi ini masih memutar lagu/video yang sedang ditampilkan? (judulnya hanya dibaca untuk sesi milik pemutar
+# yang sedang tampil, jadi paling banyak satu permintaan metadata tambahan per tick)
+function Test-ShownMedia($s) {
+    $m = $script:media
+    if (-not $m -or $s.SourceAppUserModelId -ne $m.App) { return $false }
+    try { $p = Await ($s.TryGetMediaPropertiesAsync()) ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionMediaProperties]) } catch { return $false }
+    "$($m.App)|$($p.Title)|$($p.Artist)" -eq $m.Key
+}
+
 # Bersuara dalam 3 detik terakhir (jeda antarlagu / bagian hening tidak langsung dianggap bisu)
 function Test-AppAudible($aumid) {
     $t = $script:audibleAt[(Get-AppAudioKey $aumid)]
@@ -1320,19 +1442,25 @@ function Poll-Media {
     if (-not $script:mediaMgr) { return }
     # Spotify, Chrome (YouTube Music), Apple Music bisa terbuka bersamaan. Urutan: diputar dan bersuara,
     # diputar, lalu yang di-pause; kalau sama kuat, pemutar yang sedang ditampilkan menang (lalu pilihan Windows).
-    # Video bisu di browser (autoplay reels/feed Facebook, Instagram, dll) tetap melapor "Playing":
-    # diabaikan, supaya tidak menutupi musik yang sedang diputar.
-    Update-AppAudio
+    # Video bisu di browser (autoplay reels/feed Facebook, Instagram, dll) tetap melapor "Playing": diabaikan,
+    # supaya tidak menutupi musik yang sedang diputar. Kecuali lagu/video yang sedang ditampilkan: jeda hening,
+    # buffering, atau dibisukan dari island sendiri tidak membuatnya hilang.
+    $all = @($script:mediaMgr.GetSessions())
+    $on = @(foreach ($s in $all) { "$($s.GetPlaybackInfo().PlaybackStatus)" -eq 'Playing' })
+    # Level suara per aplikasi hanya dibaca kalau bisa mengubah pilihan: ada browser yang diputar, atau lebih
+    # dari satu pemutar diputar bersamaan
+    $nOn = 0; $browserOn = $false
+    for ($i = 0; $i -lt $all.Count; $i++) { if ($on[$i]) { $nOn++; if ($all[$i].SourceAppUserModelId -match $BROWSER_APP) { $browserOn = $true } } }
+    if ($browserOn -or $nOn -gt 1) { Update-AppAudio }
     $sess = $null; $best = -1
     $shown = if ($script:media) { $script:media.App } else { '' }
     $winCur = $script:mediaMgr.GetCurrentSession()
     $winApp = if ($winCur) { $winCur.SourceAppUserModelId } else { '' }
-    foreach ($s in $script:mediaMgr.GetSessions()) {
-        $a = $s.SourceAppUserModelId
-        $on = "$($s.GetPlaybackInfo().PlaybackStatus)" -eq 'Playing'
+    for ($i = 0; $i -lt $all.Count; $i++) {
+        $s = $all[$i]; $a = $s.SourceAppUserModelId
         $loud = Test-AppAudible $a
-        if ($on -and -not $loud -and $a -match $BROWSER_APP) { continue }
-        $score = $(if ($on -and $loud) { 8 } elseif ($on) { 6 } else { 2 })
+        if ($on[$i] -and -not $loud -and $a -match $BROWSER_APP -and -not (Test-ShownMedia $s)) { continue }
+        $score = $(if ($on[$i] -and $loud) { 8 } elseif ($on[$i]) { 6 } else { 2 })
         if ($a -eq $shown) { $score += 1 } elseif ($a -eq $winApp) { $score += 0.5 }
         if ($score -gt $best) { $sess = $s; $best = $score }
     }
@@ -1349,7 +1477,12 @@ function Poll-Media {
     if ($old -and $old.App -eq $app -and $old.Playing -eq $playing -and -not $playing -and -not $script:mediaForce -and ($script:mediaTick % 3) -ne 0) { return }
     $script:mediaForce = $false
     $props = Await ($sess.TryGetMediaPropertiesAsync()) ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionMediaProperties])
-    if (-not $props.Title) { return }   # metadata kadang kosong sesaat saat ganti lagu
+    if (-not $props.Title) {
+        # Metadata kadang kosong sesaat saat ganti lagu (pemutar yang sama): tunggu tick berikutnya. Pemutar lain
+        # tanpa judul (mis. setelah pemutar yang tampil ditutup) tidak boleh membekukan lagu lama di island.
+        if ($old -and $old.App -ne $app) { $script:media = $null; Media-Changed $false }
+        return
+    }
     $key = "$app|$($props.Title)|$($props.Artist)"
     if (-not $old -or $old.Key -ne $key) {
         $cv = Read-Cover $props.Thumbnail
@@ -1367,9 +1500,13 @@ function Poll-Media {
         Media-Changed ($playing -and $script:initialized)
     } elseif ($old.Playing -ne $playing) {
         $tl = Get-Timeline $sess $playing
+        $hadEnd = $old.End -gt 0
         $old.Playing = $playing; $old.Session = $sess
         $old.Pos = $tl.Pos; $old.End = $tl.End; $old.PosAt = Get-Date
         Media-Changed $false
+        # Durasi bisa datang bersamaan dengan play/pause (video yang dibuka dalam keadaan pause): lirik video
+        # baru dicari setelah durasinya ada (lihat Request-Lyrics)
+        if (-not $hadEnd -and $tl.End -gt 0) { try { Request-Lyrics } catch { Log "lyrics req: $_" } }
     } else {
         # Lagu sama: kalau posisi meleset (lagu digeser, pemutar/PC tersendat), sinkronkan progress bar
         # dan acuan posisi lirik. Laporan posisi baru dari pemutar (Spotify: tiap ~4,5 detik) paling bisa
@@ -1401,16 +1538,19 @@ function Poll-Media {
             if ($script:miniBar) { Start-Progress $script:miniBar }
         }
     }
-    # Browser mengirim ikonnya sendiri sebagai cover saat video berganti; thumbnail videonya menyusul
-    # beberapa detik kemudian (judulnya tidak berubah). Cek ulang cover selama 30 tick pertama.
+    # Cover sering datang terlambat dengan judul yang sama: browser mengirim ikonnya sendiri dulu (thumbnail
+    # video menyusul beberapa detik kemudian), Apple Music mengirim judul tanpa cover lalu covernya ~1 detik
+    # kemudian. Cek ulang cover selama 30 tick pertama lagu, untuk semua pemutar.
     $m = $script:media
-    if ($m -and $m.Key -eq $key -and "$app" -match $BROWSER_APP -and $m.CoverChecks -lt 30 -and $props.Thumbnail) {
+    if ($m -and $m.Key -eq $key -and $m.CoverChecks -lt 30 -and $props.Thumbnail) {
         $m.CoverChecks++
         $h = $m.CoverHash
         try { $h = Get-BytesHash (Read-StreamBytes $props.Thumbnail) } catch {}
         if ($h -ne $m.CoverHash) {
             $cv = Read-Cover $props.Thumbnail
             $m.Art = $cv.Art; $m.Accent = $cv.Accent; $m.Accent2 = $cv.Accent2; $m.Accent3 = $cv.Accent3; $m.CoverHash = $cv.Hash
+            # Mini island hanya dibangun ulang saat lagunya berganti: paksa supaya cover & warna barunya ikut tampil
+            if ($script:mode -eq 'idle') { $script:miniKey = $null }
             Media-Changed $false
         }
     }
@@ -1479,10 +1619,18 @@ function Media-Command($cmd) {
     $script:mediaForce = $true
 }
 
+# Pemutar mengizinkan lompat ke posisi lain lewat kontrol media Windows? (Apple Music tidak: posisinya
+# hanya bisa digeser di aplikasinya sendiri, jadi progress dan baris lirik tidak dibuat bisa diklik)
+function Test-MediaSeekable {
+    $m = $script:media
+    if (-not $m -or -not $m.Session -or $m.End -le 0) { return $false }
+    try { [bool]$m.Session.GetPlaybackInfo().Controls.IsPlaybackPositionEnabled } catch { $true }
+}
+
 # Lompat ke detik tertentu (klik / geser gelombang progress)
 function Media-Seek($sec) {
     $m = $script:media
-    if (-not $m -or -not $m.Session -or $m.End -le 0) { return }
+    if (-not (Test-MediaSeekable)) { return }
     $sec = [Math]::Max(0.0, [Math]::Min($m.End - 0.5, [double]$sec))
     try { [void]$m.Session.TryChangePlaybackPositionAsync([long]($sec * 10000000)) } catch { Log "seek: $_" }
     $m.Pos = $sec; $m.PosAt = Get-Date
@@ -1504,7 +1652,7 @@ function Preview-Seek($pb, $x) {
 }
 
 # Tiga batang equalizer; bergerak saat lagu diputar, diam saat pause
-function New-Equalizer($color, $playing, $fps = $ANIM_FPS) {
+function New-Equalizer($color, $playing, $fps = $AMBIENT_FPS) {
     $sp = New-Object System.Windows.Controls.StackPanel
     $sp.Orientation = 'Horizontal'; $sp.VerticalAlignment = 'Center'; $sp.Margin = '6,0,0,0'
     $i = 0
@@ -1545,6 +1693,63 @@ function New-MediaButton($glyph, $cmd, $size) {
 }
 
 # Isi Now Playing: cover | judul + equalizer / artis | tombol kontrol
+# Artis untuk ditampilkan: Apple Music menaruh nama album di kolom artis ("Artis (em dash) Album"), albumnya dibuang
+function Get-DisplayArtist($m) { "$($m.Artist)" -replace '\s+\u2014\s+.*$', '' }
+
+# Teks satu baris yang berjalan kalau tidak muat (judul/artis panjang di kartu musik): diam 2 detik, lalu
+# bergeser sampai salinan keduanya tepat di posisi awal (putaran tanpa sambungan), diam lagi, dan seterusnya.
+# Tepinya memudar selama berjalan. Kalau muat, tetap diam seperti teks biasa.
+$SCROLL_GAP = 28
+function New-ScrollText($text, $size, $weight, $color) {
+    $cv = New-Object System.Windows.Controls.Canvas
+    $cv.ClipToBounds = $true
+    $sp = New-Object System.Windows.Controls.StackPanel
+    $sp.Orientation = 'Horizontal'
+    foreach ($i in 0, 1) {
+        $tb = New-Object System.Windows.Controls.TextBlock
+        $tb.Text = "$text"; $tb.FontSize = $size; $tb.FontWeight = $weight; $tb.Foreground = Brush $color
+        if ($i -eq 1) { $tb.Margin = "$SCROLL_GAP,0,0,0"; $tb.Visibility = 'Collapsed' }
+        [void]$sp.Children.Add($tb)
+    }
+    $sp.RenderTransform = New-Object System.Windows.Media.TranslateTransform
+    [void]$cv.Children.Add($sp)
+    $sp.Measure((New-Object System.Windows.Size([double]::PositiveInfinity, [double]::PositiveInfinity)))
+    $cv.Height = $sp.DesiredSize.Height
+    $cv.Tag = @{ Panel = $sp; TextW = $sp.DesiredSize.Width; W = -1 }
+    $cv.Add_SizeChanged({ param($s, $e) Update-ScrollText $s })
+    $cv
+}
+function Update-ScrollText($cv) {
+    $st = $cv.Tag; $sp = $st.Panel; $W = $cv.ActualWidth
+    if ($W -le 0 -or [Math]::Abs($W - $st.W) -lt 0.5) { return }
+    $st.W = $W
+    $tt = $sp.RenderTransform; $xp = [System.Windows.Media.TranslateTransform]::XProperty
+    $tt.BeginAnimation($xp, $null); $tt.X = 0
+    if ($st.TextW -le $W + 0.5) {
+        $sp.Children[1].Visibility = 'Collapsed'; $cv.OpacityMask = $null
+        return
+    }
+    $sp.Children[1].Visibility = 'Visible'
+    $cycle = $st.TextW + $SCROLL_GAP
+    $hold = 2.0; $run = $cycle / $MARQUEE_SPEED
+    $a = New-Object System.Windows.Media.Animation.DoubleAnimationUsingKeyFrames
+    $a.Duration = New-Object System.Windows.Duration ([TimeSpan]::FromSeconds($hold + $run))
+    $a.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
+    [void]$a.KeyFrames.Add((New-Object System.Windows.Media.Animation.LinearDoubleKeyFrame(0.0, [System.Windows.Media.Animation.KeyTime]::FromTimeSpan([TimeSpan]::FromSeconds($hold)))))
+    [void]$a.KeyFrames.Add((New-Object System.Windows.Media.Animation.LinearDoubleKeyFrame((-$cycle), [System.Windows.Media.Animation.KeyTime]::FromTimeSpan([TimeSpan]::FromSeconds($hold + $run)))))
+    [System.Windows.Media.Animation.Timeline]::SetDesiredFrameRate($a, $AMBIENT_FPS)
+    $tt.BeginAnimation($xp, $a)
+    Track-Anim $sp $tt $xp
+    $mask = New-Object System.Windows.Media.LinearGradientBrush
+    $mask.MappingMode = 'Absolute'; $mask.StartPoint = '0,0'; $mask.EndPoint = "$W,0"
+    $f = [Math]::Min(0.12, 14 / $W)
+    # (1 - $f) dalam kurung: koma lebih kuat dari minus di PowerShell, tanpa kurung jadi (255, 1) - $f
+    foreach ($s in @(@(0, 0.0), @(255, $f), @(255, (1 - $f)), @(0, 1.0))) {
+        $mask.GradientStops.Add((New-Object System.Windows.Media.GradientStop((Rgb 0 0 0 $s[0]), $s[1])))
+    }
+    $cv.OpacityMask = $mask
+}
+
 function New-MediaContent {
     $m = $script:media
     $g = New-Object System.Windows.Controls.Grid
@@ -1576,12 +1781,9 @@ function New-MediaContent {
     $eq = New-Equalizer $m.Accent $m.Playing
     [System.Windows.Controls.DockPanel]::SetDock($eq, 'Right')
     [void]$titleRow.Children.Add($eq)
-    $t1 = New-Object System.Windows.Controls.TextBlock
-    $t1.Text = $m.Title; $t1.Foreground = Brush '#FFFFFF'; $t1.FontSize = 13; $t1.FontWeight = 'SemiBold'; $t1.TextTrimming = 'CharacterEllipsis'
-    [void]$titleRow.Children.Add($t1)
-    $t2 = New-Object System.Windows.Controls.TextBlock
-    $t2.Text = $m.Artist; $t2.Foreground = Brush '#A1A1A6'; $t2.FontSize = 12; $t2.TextTrimming = 'CharacterEllipsis'
-    [void]$mid.Children.Add($titleRow); [void]$mid.Children.Add($t2)
+    # Judul / artis yang terlalu panjang berjalan pelan (bukan dipotong dengan "...")
+    [void]$titleRow.Children.Add((New-ScrollText $m.Title 13 'SemiBold' '#FFFFFF'))
+    [void]$mid.Children.Add($titleRow); [void]$mid.Children.Add((New-ScrollText (Get-DisplayArtist $m) 12 'Normal' '#A1A1A6'))
     [void]$g.Children.Add($mid)
 
     $ctl = New-Object System.Windows.Controls.StackPanel
@@ -1632,6 +1834,16 @@ function Prune-Anims {
             $script:liveAnims.RemoveAt($i)
         }
     }
+}
+
+# Pudar halus untuk pergantian lagu: kurva Sine masuk-keluar (mulai dan berhenti pelan, tanpa geser)
+$SONG_FADE_MS = 380
+function Fade-Smooth($el, $to, $ms = $SONG_FADE_MS, $delay = 0) {
+    $a = New-Object System.Windows.Media.Animation.DoubleAnimation($to, (New-Object System.Windows.Duration (Ms $ms)))
+    $a.BeginTime = Ms $delay
+    $e = New-Object System.Windows.Media.Animation.SineEase; $e.EasingMode = 'EaseInOut'; $a.EasingFunction = $e
+    [System.Windows.Media.Animation.Timeline]::SetDesiredFrameRate($a, $ANIM_FPS)
+    $el.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $a)
 }
 
 function Animate60($el, $prop, $from, $to, $ms, $delay = 0) {
@@ -1690,21 +1902,48 @@ function Switch-BottomRow {
     $bottomSwapTimer.Start()
 }
 
-# ---------- Volume (volume utama Windows) ----------
+# ---------- Volume (aplikasi pemutar, atau volume utama Windows) ----------
 $script:volumeMode = $false
 $script:volUI = $null
 $BOTTOM_ROW_H = 24
 $GLYPH_VOL = [string][char]0xE767; $GLYPH_MUTE = [string][char]0xE74F
 
-function Get-Vol { try { [double][SysVolume]::Get() } catch { -1.0 } }
-function Get-Muted { try { [SysVolume]::GetMute() } catch { $false } }
+# Kunci audio pemutar yang sedang ditampilkan kalau slider mengatur volume aplikasinya (seperti di volume
+# mixer Windows), atau $null = volume utama Windows: dimatikan di menu, atau aplikasinya belum punya sesi
+# audio (belum pernah bersuara). Pemutar di browser: volume seluruh browser (Windows tidak membedakan tab).
+function Get-VolTarget {
+    if (-not $script:settings.AppVolume -or -not $script:media) { return $null }
+    $k = Get-AppAudioKey $script:media.App
+    try { if ([AppAudio]::GetVolume($k) -ge 0) { return $k } } catch { Log "app volume: $_" }
+    $null
+}
+function Get-Vol {
+    $k = Get-VolTarget
+    try { if ($k) { [double][AppAudio]::GetVolume($k) } else { [double][SysVolume]::Get() } } catch { -1.0 }
+}
+function Get-Muted {
+    $k = Get-VolTarget
+    try { if ($k) { [AppAudio]::GetMute($k) } else { [SysVolume]::GetMute() } } catch { $false }
+}
 
 function Set-Vol($v) {
     try {
         $v = [Math]::Max(0.0, [Math]::Min(1.0, [double]$v))
-        [SysVolume]::Set([float]$v)
-        if ($v -gt 0 -and (Get-Muted)) { [SysVolume]::SetMute($false) }
+        $k = Get-VolTarget
+        if ($k) {
+            [AppAudio]::SetVolume($k, [float]$v)
+            if ($v -gt 0 -and [AppAudio]::GetMute($k)) { [AppAudio]::SetMute($k, $false) }
+        } else {
+            [SysVolume]::Set([float]$v)
+            if ($v -gt 0 -and [SysVolume]::GetMute()) { [SysVolume]::SetMute($false) }
+        }
     } catch { Log "volume: $_" }
+    Update-VolumeUI
+}
+
+function Toggle-Mute {
+    $k = Get-VolTarget
+    try { if ($k) { [AppAudio]::SetMute($k, -not [AppAudio]::GetMute($k)) } else { [SysVolume]::SetMute(-not [SysVolume]::GetMute()) } } catch { Log "mute: $_" }
     Update-VolumeUI
 }
 
@@ -1755,7 +1994,7 @@ function Set-VolFromMouse($s, $e) {
 function New-VolumeRow {
     $m = $script:media
     $outer = New-Object System.Windows.Controls.Grid
-    $outer.Margin = '12,4,16,8'; $outer.Height = $BOTTOM_ROW_H; $outer.Tag = 'nodrag'
+    $outer.Margin = '12,8,16,4'; $outer.Height = $BOTTOM_ROW_H; $outer.Tag = 'nodrag'
     foreach ($cw in 'Auto', '*', 'Auto', 'Auto') {
         $cd = New-Object System.Windows.Controls.ColumnDefinition
         $cd.Width = (New-Object System.Windows.GridLengthConverter).ConvertFromString($cw)
@@ -1773,8 +2012,7 @@ function New-VolumeRow {
     $mb.Add_MouseLeftButtonUp({
         param($s, $e)
         $e.Handled = $true
-        try { [SysVolume]::SetMute(-not (Get-Muted)) } catch { Log "mute: $_" }
-        Update-VolumeUI
+        Toggle-Mute
     })
     [void]$outer.Children.Add($mb)
 
@@ -1885,8 +2123,9 @@ function Update-ProgressTime($pb) {
 # garis datar | durasi lagu
 function New-WaveProgress($w) {
     $outer = New-Object System.Windows.Controls.Grid
-    # Tinggi sama persis dengan baris volume ($BOTTOM_ROW_H) supaya pergantian keduanya tidak meloncat
-    $outer.Margin = '16,4,16,8'; $outer.Height = $BOTTOM_ROW_H
+    # Tinggi dan jarak sama persis dengan baris volume ($BOTTOM_ROW_H) supaya pergantian keduanya tidak meloncat.
+    # Waktu, bar + titik, dan tombol sejajar di garis tengah baris; bukit gelombang naik di atasnya.
+    $outer.Margin = '16,8,16,4'; $outer.Height = $BOTTOM_ROW_H
     foreach ($cw in 'Auto', '*', 'Auto', 'Auto', 'Auto') {
         $cd = New-Object System.Windows.Controls.ColumnDefinition
         $cd.Width = (New-Object System.Windows.GridLengthConverter).ConvertFromString($cw)
@@ -1898,7 +2137,7 @@ function New-WaveProgress($w) {
     $posText = New-Object System.Windows.Controls.TextBlock
     $endText = New-Object System.Windows.Controls.TextBlock
     foreach ($t in $posText, $endText) {
-        $t.Foreground = Brush '#B8B8BD'; $t.FontSize = 10.5; $t.VerticalAlignment = 'Bottom'; $t.Margin = '0,0,0,1'
+        $t.Foreground = Brush '#B8B8BD'; $t.FontSize = 10.5; $t.VerticalAlignment = 'Center'
         $t.FontFamily = 'Segoe UI Variable Text, Segoe UI'
         $t.Typography.NumeralAlignment = 'Tabular'
     }
@@ -1909,23 +2148,31 @@ function New-WaveProgress($w) {
     $tg = New-VolumeToggle
     [System.Windows.Controls.Grid]::SetColumn($tg, 4)
     [void]$outer.Children.Add($tg)
-    $pb = New-WaveStrip $w 18
+    # Bar (4 px, di dasar jalur gelombang) tepat di garis tengah baris: jalurnya menjorok ke atas baris
+    # (margin atas negatif, jadi tidak terpotong) untuk ruang bukit gelombang
+    $waveH = 22
+    $pb = New-WaveStrip $w $waveH
     $pb.PosText = $posText; $pb.EndText = $endText
-    $pb.Root.Margin = '6,0,6,1'
-    # Klik / geser di gelombang = lompat ke bagian lagu itu. 'nodrag': geseran ini bukan swipe pindah halaman.
-    $outer.Tag = 'nodrag'
+    $pb.Root.Margin = "6,$($BOTTOM_ROW_H / 2 + 2 - $waveH),6,$($BOTTOM_ROW_H / 2 - 2)"
     $r = $pb.Root
-    $r.IsHitTestVisible = $true; $r.Background = Brush '#01000000'; $r.Cursor = 'Hand'
-    $r.Add_MouseLeftButtonDown({ param($s, $e) $e.Handled = $true; [void]$s.CaptureMouse(); Preview-Seek $s.Tag ($e.GetPosition($s).X) })
-    $r.Add_MouseMove({ param($s, $e) if ($s.IsMouseCaptured) { Preview-Seek $s.Tag ($e.GetPosition($s).X) } })
-    $r.Add_MouseLeftButtonUp({
-        param($s, $e)
-        if (-not $s.IsMouseCaptured) { return }
-        $e.Handled = $true
-        $x = $e.GetPosition($s).X; $W = $s.ActualWidth
-        $s.ReleaseMouseCapture()
-        if ($W -gt 0 -and $script:media) { Media-Seek ([Math]::Max(0.0, [Math]::Min(1.0, $x / $W)) * $script:media.End) }
-    })
+    $r.IsHitTestVisible = $true; $r.Background = Brush '#01000000'
+    if (Test-MediaSeekable) {
+        # Klik / geser di gelombang = lompat ke bagian lagu itu. 'nodrag': geseran ini bukan swipe pindah halaman.
+        $outer.Tag = 'nodrag'
+        $r.Cursor = 'Hand'
+        $r.Add_MouseLeftButtonDown({ param($s, $e) $e.Handled = $true; [void]$s.CaptureMouse(); Preview-Seek $s.Tag ($e.GetPosition($s).X) })
+        $r.Add_MouseMove({ param($s, $e) if ($s.IsMouseCaptured) { Preview-Seek $s.Tag ($e.GetPosition($s).X) } })
+        $r.Add_MouseLeftButtonUp({
+            param($s, $e)
+            if (-not $s.IsMouseCaptured) { return }
+            $e.Handled = $true
+            $x = $e.GetPosition($s).X; $W = $s.ActualWidth
+            $s.ReleaseMouseCapture()
+            if ($W -gt 0 -and $script:media) { Media-Seek ([Math]::Max(0.0, [Math]::Min(1.0, $x / $W)) * $script:media.End) }
+        })
+    } else {
+        $r.ToolTip = T 'Posisi lagu ini hanya bisa digeser di aplikasi pemutarnya' 'This player only lets you jump within its own app'
+    }
     [System.Windows.Controls.Grid]::SetColumn($pb.Root, 1)
     [void]$outer.Children.Add($pb.Root)
     $script:progressBars += $pb
@@ -1965,14 +2212,18 @@ function New-WaveStrip($w, $h, [switch]$Small) {
     [void]$root.Children.Add($track)
 
     $kt = New-Object System.Windows.Media.TranslateTransform
-    $wave = New-Object IslandWave($h, $baseY, $(if ($Small) { 0.42 } else { 1.0 }), [System.Windows.Media.Color[]]@($l1, $l2, $l3), $kt, ($knobS / 2))
+    $wave = New-Object IslandWave($h, $baseY, $(if ($Small) { 0.42 } else { 1.0 }), $(if ($Small) { 1.0 } else { 1.15 }), [System.Windows.Media.Color[]]@($l1, $l2, $l3), $kt, ($knobS / 2))
     $wave.Playing = [bool]$m.Playing
     [void]$root.Children.Add($wave.Root)
 
-    # Bar terisi (bagian lagu yang sudah lewat): tebal, warna album, dipotong di posisi lagu
+    # Bar terisi (bagian lagu yang sudah lewat): tebal, warna album yang makin terang ke kanan, dipotong di posisi lagu
     $bar = New-Object System.Windows.Controls.Border
     $bar.Height = $barH; $bar.CornerRadius = New-Object System.Windows.CornerRadius($barH / 2)
-    $bar.Background = New-Object System.Windows.Media.SolidColorBrush($c1)
+    $bg = New-Object System.Windows.Media.LinearGradientBrush
+    $bg.StartPoint = '0,0.5'; $bg.EndPoint = '1,0.5'
+    $bg.GradientStops.Add((New-Object System.Windows.Media.GradientStop($c1, 0)))
+    $bg.GradientStops.Add((New-Object System.Windows.Media.GradientStop((Rgb ($c1.R + (255 - $c1.R) * 0.35) ($c1.G + (255 - $c1.G) * 0.35) ($c1.B + (255 - $c1.B) * 0.35)), 1)))
+    $bar.Background = $bg
     $bar.VerticalAlignment = 'Bottom'; $bar.Margin = "0,0,0,$barBottom"
     $barT = New-Object System.Windows.Media.TranslateTransform
     $barClip = New-Object System.Windows.Media.RectangleGeometry((New-Object System.Windows.Rect(-4000, -4, 4000, ($barH + 8))))
@@ -2039,7 +2290,8 @@ function Get-MediaPopupSize($content) {
 
 # Isi kartu lama yang sedang memudar keluar saat lagu berganti (dibuang setelah animasinya selesai)
 $mediaSwapTimer = New-Object System.Windows.Threading.DispatcherTimer
-$mediaSwapTimer.Interval = Ms 420
+# Setelah isi lama selesai memudar (jeda 80 + 380 ms, lihat Show-Media)
+$mediaSwapTimer.Interval = Ms 500
 $mediaSwapTimer.Add_Tick({
     $mediaSwapTimer.Stop()
     $hostG = $mediaView.Child
@@ -2058,21 +2310,16 @@ function Show-Media([switch]$Refresh) {
     $hostG = $mediaView.Child
     $newSong = $Refresh -and $script:mediaViewKey -and $script:mediaViewKey -ne $script:media.Key
     if ($newSong -and $hostG -is [System.Windows.Controls.Grid] -and $hostG.Tag -eq 'holder') {
-        # Lagu berganti saat kartu terbuka: isi lama bergeser ke kiri sambil memudar, isi baru masuk dari kanan
-        $xp = [System.Windows.Media.TranslateTransform]::XProperty
+        # Lagu berganti saat kartu terbuka: crossfade halus di tempat (tanpa geser). Isi lama mulai memudar
+        # sedikit setelah isi baru mulai menampak, jadi kartu tidak sempat redup di tengah.
         foreach ($old in @($hostG.Children)) {
             if ($old.Tag -eq 'out') { continue }
             $old.Tag = 'out'; $old.IsHitTestVisible = $false
-            if (-not ($old.RenderTransform -is [System.Windows.Media.TranslateTransform])) { $old.RenderTransform = New-Object System.Windows.Media.TranslateTransform }
-            Animate60 $old.RenderTransform $xp 0 -16 340
-            Animate60 $old ([System.Windows.UIElement]::OpacityProperty) $old.Opacity 0 340
+            Fade-Smooth $old 0 $SONG_FADE_MS 80
         }
-        # Isi baru menampak bersamaan dengan isi lama memudar, jadi kartu tidak sempat redup di tengah
-        $content.RenderTransform = New-Object System.Windows.Media.TranslateTransform(16, 0)
         $content.Opacity = 0
         [void]$hostG.Children.Add($content)
-        Animate60 $content.RenderTransform $xp 16 0 380
-        Animate60 $content ([System.Windows.UIElement]::OpacityProperty) 0 1 260
+        Fade-Smooth $content 1
         $mediaSwapTimer.Stop(); $mediaSwapTimer.Start()
     } else {
         $hostG = New-Object System.Windows.Controls.Grid
@@ -2093,7 +2340,8 @@ function Show-Media([switch]$Refresh) {
 
 function Open-Notif($n) {
     if ($n.Kind -eq 'update') { Start-SelfUpdate; return }
-    if ($n.Exe) { try { Start-Process $n.Exe } catch { Log "open exe: $_" } }
+    # Kedipan taskbar (WeChat) bukan notifikasi Windows: buka exe-nya kalau diketahui, tidak ada yang dihapus
+    if ($n.Flash) { if ($n.Exe) { try { Start-Process $n.Exe } catch { Log "open exe: $_" } } }
     else {
         Open-App $n.Aumid
         # Sudah dibuka berarti sudah dibaca: hapus juga dari Pusat Notifikasi
@@ -2125,6 +2373,12 @@ function Go-Idle {
     if (Want-Mini) { Show-Mini }
     else {
         $script:miniOn = $false; $script:miniVisible = $false; $miniTimer.Stop()
+        # Cahaya album ikut padam dan napasnya berhenti: tanpa ini animasinya terus jalan di latar selama island
+        # tersembunyi (mis. selama main game fullscreen), sampai notifikasi berikutnya
+        $gc = $glow.Background.Color
+        $ga = New-Object System.Windows.Media.Animation.ColorAnimation((Rgb $gc.R $gc.G $gc.B 0), (New-Object System.Windows.Duration (Ms 300)))
+        $glow.Background.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty, $ga)
+        Set-GlowBreath $false
         # Menghilang pelan dan seirama: isi memudar, island mengecil halus (tanpa pantulan) sambil memudar
         Resize-Island $IDLE_W $IDLE_H 15 -Smooth
         Show-View 'none'
@@ -2185,18 +2439,31 @@ function New-MiniContent {
 # Mini island selama lagu diputar: pil kecil berisi judul & artis yang berjalan. Saat ada baris lirik,
 # pil membesar mulus menjadi baris lirik, lalu kembali mengecil saat lirik selesai / jeda instrumental.
 function Show-Mini {
+    # Lagu berganti saat mini island sedang menampilkan lagu: isi lama memudar keluar sambil isi baru memudar masuk
+    $crossfade = $script:miniOn -and $script:miniVisible -and $script:miniKey -and $script:miniKey -ne 'clock' -and
+        $script:mode -eq 'idle' -and (Get-MiniKey) -ne 'clock'
     $script:miniOn = $true
     $script:miniVisible = $true
     $script:miniKey = Get-MiniKey
     $script:miniFaded = $false
     $music = $script:miniKey -ne 'clock'
     $mv = $views['MiniView']
-    $mv.Children.Clear()
+    if ($crossfade) {
+        foreach ($old in @($mv.Children)) {
+            if ($old.Tag -eq 'out') { continue }
+            $old.Tag = 'out'
+            Fade-Smooth $old 0 $SONG_FADE_MS 80
+        }
+        $miniSwapTimer.Stop(); $miniSwapTimer.Start()
+    } else { $mv.Children.Clear() }
     $script:miniW = -1; $script:miniH = -1
     $script:lyricIdx = -2
     if ($music) {
         Set-Theme $script:media.Accent
-        [void]$mv.Children.Add((New-MiniContent))
+        $nc = New-MiniContent
+        if ($crossfade) { $nc.Opacity = 0 }
+        [void]$mv.Children.Add($nc)
+        if ($crossfade) { Fade-Smooth $nc 1 }
     } else {
         Set-Theme $CLOCK_COLOR
         $script:miniLyricHost = $null; $script:miniBar = $null
@@ -2217,6 +2484,15 @@ function Show-Mini {
     $miniTimer.Start()
 }
 
+# Isi mini island lagu sebelumnya dibuang setelah selesai memudar (lihat crossfade di Show-Mini)
+$miniSwapTimer = New-Object System.Windows.Threading.DispatcherTimer
+$miniSwapTimer.Interval = Ms 500
+$miniSwapTimer.Add_Tick({
+    $miniSwapTimer.Stop()
+    $mv = $views['MiniView']
+    foreach ($el in @($mv.Children)) { if ($el.Tag -eq 'out') { $mv.Children.Remove($el) } }
+})
+
 # Antar baris lirik ukurannya berubah lebih cepat supaya tidak terasa tertinggal dari teksnya
 function Set-MiniSize($w, $ht, $ms = 0) {
     if ($w -eq $script:miniW -and $ht -eq $script:miniH) { return }
@@ -2229,7 +2505,8 @@ function Set-MiniSize($w, $ht, $ms = 0) {
 $MARQUEE_SPEED = 22   # px per detik
 function New-MiniMarquee {
     $m = $script:media
-    $txt = if ($m.Artist) { "$($m.Title)  " + [char]0x00B7 + "  $($m.Artist)" } else { "$($m.Title)" }
+    $artist = Get-DisplayArtist $m
+    $txt = if ($artist) { "$($m.Title)  " + [char]0x00B7 + "  $artist" } else { "$($m.Title)" }
     $cv = New-Object System.Windows.Controls.Canvas
     $cv.ClipToBounds = $true; $cv.Height = 15
     $sp = New-Object System.Windows.Controls.StackPanel
@@ -2248,7 +2525,7 @@ function New-MiniMarquee {
     $sp.RenderTransform = $tt
     $a = New-Object System.Windows.Media.Animation.DoubleAnimation(0.0, (-$cycle), (New-Object System.Windows.Duration ([TimeSpan]::FromSeconds($cycle / $MARQUEE_SPEED))))
     $a.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
-    [System.Windows.Media.Animation.Timeline]::SetDesiredFrameRate($a, $ANIM_FPS)
+    [System.Windows.Media.Animation.Timeline]::SetDesiredFrameRate($a, $AMBIENT_FPS)
     $tt.BeginAnimation([System.Windows.Media.TranslateTransform]::XProperty, $a)
     Track-Anim $sp $tt ([System.Windows.Media.TranslateTransform]::XProperty)
     # Tepi kiri/kanan memudar (selebar area teks di pil kecil)
@@ -2329,17 +2606,19 @@ function Clean-SongText($s) {
 # Video = video browser; Music = judulnya memang seperti lagu (video lain, mis. reels, tidak dicarikan lirik).
 function Get-SongQuery($m) {
     $title = "$($m.Title)"; $artist = "$($m.Artist)"
-    $video = "$($m.App)" -match $BROWSER_APP -and -not $m.Album
+    # Aplikasi YouTube Music yang dipasang dari Chrome punya AUMID sendiri: itu pemutar musik, bukan video
+    $video = "$($m.App)" -match $BROWSER_APP -and "$($m.App)" -notmatch 'cinhimbnkkaeohfgghhklpknlkffjgod' -and -not $m.Album
     $music = -not $video
     if ($video) {
+        # Tanda video musik (kata utuh, bukan sekadar "video" di akhir judul vlog): Official, MV/PV, Music/Lyric
+        # Video, Lyrics, (Audio); atau channel lagu: "Artis - Topic" (dibuat otomatis YouTube), "ArtisVEVO", "Artis Official"
+        $music = $title -match '(?i)\bofficial\b|\bm/?v\b|\bpv\b|\bmusic\s*video\b|\blyrics?\b|[\(\[]\s*audio\s*[\)\]]' -or
+            $artist -match '(?i)\s-\sTopic$|VEVO$|\bofficial\b|\u516C\u5F0F'
         # [MV], (Official Video), [OFFICIAL], (lebar penuh) MV, "| channel" di belakang, "Official Music Video" di akhir
         # (juga versi: "(Full version)", "<Platinum Long Version>" kurung sudut lebar penuh, "(TV size)")
         $t = [regex]::Replace($title, '\s*[\(\[\u3010\uff1c<\u3008][^\)\]\u3011\uff1e>\u3009]*(official|video|audio|lyric|m/?v|4k|hd|\bver\b|version|\bfull\b|\blong\b|\bsize\b)[^\)\]\u3011\uff1e>\u3009]*[\)\]\u3011\uff1e>\u3009]', '', 'IgnoreCase')
-        $tagged = $t -ne $title
         $t = [regex]::Replace($t, '\s*[|\uFF5C].*$', '')
-        $title = [regex]::Replace($t, '\s*(official\s*)?(music\s*video|lyric\s*video|video|audio|m/?v)\s*$', '', 'IgnoreCase')
-        # Tag video musik, atau channel lagu: "Artis - Topic" (dibuat otomatis oleh YouTube), "ArtisVEVO", "Artis Official"
-        $music = $tagged -or $title -ne $t -or $artist -match '(?i)\s-\sTopic$|VEVO$|official|\u516C\u5F0F'
+        $title = [regex]::Replace($t, '\s*\b(official\s*)?(music\s*video|lyric\s*video|video|audio|m/?v)\s*$', '', 'IgnoreCase')
         # Artis dari nama channel: "ArtisVEVO", "Artis Official", "Artis (kanji) official channel"
         $artist = $artist -replace 'VEVO$', '' -replace '(?i)\s*(official|\u516C\u5F0F).*$', ''
         # Judul lagu dalam tanda kutip: Kano "Stella-rium", YOASOBI (kurung siku Jepang) Idol, Ado (kurung lebar penuh) Show
@@ -2358,10 +2637,12 @@ function Get-SongQuery($m) {
             else { $title = $matches[1]; $artist = $matches[2] }
             $music = $true
         }
+        # "Get Lucky ft. Pharrell Williams" di luar kurung: penyanyi tamu bukan bagian judul lagu
+        $title = $title -replace '(?i)\s+(ft|feat|featuring)\.?\s.*$', ''
     }
     # Artis pertama saja; YouTube Music kadang menambah " - Topic", Apple Music menambah " (em dash) Album",
     # channel kadang memakai dua nama ("nama Jepang / nama Latin")
-    $artist = (($artist -replace '\s+-\s+Topic$', '' -replace '\s+\u2014\s+.*$', '') -split ',|&|\s+/\s+|\s+feat\.?\s+|\s+x\s+')[0].Trim()
+    $artist = (($artist -replace '\s+-\s+Topic$', '' -replace '\s+\u2014\s+.*$', '') -split ',|&|\s+/\s+|\s+(?:feat|ft)\.?\s+|\s+x\s+')[0].Trim()
     @{ Title = Clean-SongText $title; Artist = $artist; Video = $video; Music = $music }
 }
 
@@ -2487,12 +2768,13 @@ function Queue-FreeSearch($r, $stage = 2) {
 function Get-PlainText($s) { ("$s" -replace '[^\p{L}\p{N}]', '').ToLowerInvariant() }
 
 # Nama sama kalau huruf/angkanya sama, abaikan tanda baca, spasi dan besar kecil ("Chimame-tai" = "chimametai").
-# Salah satu boleh lebih panjang ("Stella-rium" di "Stella-rium (TV size)") asal yang pendek minimal 3 huruf.
+# Salah satu boleh lebih panjang ("Stella-rium" di "Stella-rium (TV size)") asal yang pendek minimal 4 huruf dan
+# paling tidak separuh panjang yang lain ("Ado" bukan "Tornado")
 function Test-SameText($a, $b) {
     $a = Get-PlainText $a; $b = Get-PlainText $b
     if (-not $a -or -not $b) { return $false }
     if ($a.Length -gt $b.Length) { $a, $b = $b, $a }
-    $a -eq $b -or ($a.Length -ge 3 -and $b.Contains($a))
+    $a -eq $b -or ($a.Length -ge 4 -and $a.Length * 2 -ge $b.Length -and $b.Contains($a))
 }
 
 # Dicek tiap detik (Poll) dan tiap tick lirik; tidak pernah menunggu jaringan di thread UI
@@ -2503,8 +2785,10 @@ function Check-Lyrics {
         if ($script:media -and $script:media.Key -eq $rt.Key) { Request-Lyrics }
     }
     $r = $script:lyricsReq
-    # Pencarian bebas yang ditunda (lihat jeda setelah pencarian ketat gagal di bawah)
+    # Pencarian bebas yang ditunda (lihat jeda setelah pencarian ketat gagal di bawah). Lirik dimatikan atau
+    # lagunya sudah berganti selama menunggu: tidak usah dikirim.
     if ($r -and -not $r.Task -and (Get-Date) -ge $r.At) {
+        if (-not $script:settings.Lyrics -or -not $script:media -or $script:media.Key -ne $r.Key) { $script:lyricsReq = $null; return }
         try { $r.Task = $http.GetStringAsync($r.Url) } catch { Log "lyrics: $_"; $script:lyricsReq = $null; return }
     }
     if (-not $r -or -not $r.Task -or -not $r.Task.IsCompleted) { return }
@@ -2515,14 +2799,15 @@ function Check-Lyrics {
         try {
             # (Tanpa @(): ConvertFrom-Json PowerShell 5.1 mengeluarkan array JSON sebagai satu objek)
             $res = ConvertFrom-Json $r.Task.Result
-            # Pencarian judul saja bisa menemukan lagu lain berjudul sama: hanya artis yang cocok, atau durasi
-            # yang hampir persis sama. Video di browser (judulnya bisa kalimat biasa): di semua tahap, dan judul
-            # lagunya harus memuat seluruh judul video (lagu "Food" bukan "trying street food in Jakarta").
-            $same = { (Test-SameText $_.artistName $r.Artist) -or ($end -gt 0 -and [Math]::Abs([double]$_.duration - $end) -le 2) }
+            # Pencarian judul saja bisa menemukan lagu lain berjudul sama ("Stay"): judul dan artisnya harus sama
+            # (durasi yang kebetulan mirip tidak cukup; hasilnya disimpan selamanya). Video di browser (judulnya bisa
+            # kalimat biasa): di semua tahap judul lagunya harus memuat seluruh judul video (lagu "Food" bukan
+            # "trying street food in Jakarta"), dan artisnya sama atau durasinya cocok sampai 1 detik.
             if ($r.Strict) {
                 $t = Get-PlainText $r.Title
-                $res = @($res | Where-Object { $t -and (Get-PlainText $_.trackName).Contains($t) -and (& $same) })
-            } elseif ($r.Stage -eq 3) { $res = @($res | Where-Object $same) }
+                $res = @($res | Where-Object { $t -and (Get-PlainText $_.trackName).Contains($t) -and
+                    ((Test-SameText $_.artistName $r.Artist) -or ($end -gt 0 -and [Math]::Abs([double]$_.duration - $end) -le 1)) })
+            } elseif ($r.Stage -eq 3) { $res = @($res | Where-Object { (Test-SameText $_.trackName $r.Title) -and (Test-SameText $_.artistName $r.Artist) }) }
             $pick = Pick-Lyrics $res $end
         } catch { Log "lyrics parse: $_" }
     } else {
@@ -2579,7 +2864,8 @@ function Parse-Lrc($text) {
         $parts = [regex]::Split($body, '<(\d+:\d+(?:\.\d+)?)>')
         $clean = ''; $words = @(); $pending = $null
         for ($i = 0; $i -lt $parts.Count; $i++) {
-            if ($i % 2 -eq 1) { $a = $parts[$i] -split ':'; $pending = [int]$a[0] * 60 + [double]$a[1]; continue }
+            # [double], bukan [int]: menit tidak wajar di file lirik ([99999999999:00]) tidak boleh membuat error
+            if ($i % 2 -eq 1) { $a = $parts[$i] -split ':'; $pending = [double]$a[0] * 60 + [double]$a[1]; continue }
             $p = $parts[$i]
             if ($clean.EndsWith(' ')) { $p = $p.TrimStart() }
             if ($null -ne $pending) { $words += [PSCustomObject]@{ T = $pending; C = $clean.Length }; $pending = $null }
@@ -2592,7 +2878,7 @@ function Parse-Lrc($text) {
         if ($clean -notmatch '[\p{L}\p{N}]') { $clean = ''; $words = @() }
         foreach ($w in $words) { $w.C = [Math]::Max(0, $w.C - $lead) }
         foreach ($t in $tags) {
-            $out.Add([PSCustomObject]@{ T = [int]$t.Groups[1].Value * 60 + [double]$t.Groups[2].Value; Text = $clean; Words = $words; End = 0.0 })
+            $out.Add([PSCustomObject]@{ T = [double]$t.Groups[1].Value * 60 + [double]$t.Groups[2].Value; Text = $clean; Words = $words; End = 0.0 })
         }
     }
     $sorted = @($out | Sort-Object T)
@@ -2821,7 +3107,7 @@ function New-LyricText($line, $pos) {
     }
     $kEnd = New-Object System.Windows.Media.Animation.LinearDoubleKeyFrame(1.06, [System.Windows.Media.Animation.KeyTime]::FromTimeSpan([TimeSpan]::FromSeconds($last)))
     [void]$ka.KeyFrames.Add($kEnd)
-    [System.Windows.Media.Animation.Timeline]::SetDesiredFrameRate($ka, $ANIM_FPS)
+    [System.Windows.Media.Animation.Timeline]::SetDesiredFrameRate($ka, $AMBIENT_FPS)
     # Mulai dari tengah jalan kalau baris ini sudah dinyanyikan sebagian (BeginTime negatif)
     $ka.BeginTime = [TimeSpan]::FromSeconds(-[Math]::Max(0.0, $pos - $line.T))
     $s1.BeginAnimation([System.Windows.Media.GradientStop]::OffsetProperty, $ka)
@@ -2998,7 +3284,7 @@ function Set-LyricsToggleLook($b) {
     $b.Child.Foreground = Brush $(if ($on) { '#FFFFFF' } else { '#73FFFFFF' })
     $tip = if ($on) {
         $so = Get-SongOffset
-        $songTiming = if ([Math]::Abs($so) -lt 0.05) { T 'pas' 'as is' } elseif ($so -gt 0) { T ("ditunda {0:0.0} dtk" -f $so) ("{0:0.0} s later" -f $so) } else { T ("dimajukan {0:0.0} dtk" -f (-$so)) ("{0:0.0} s earlier" -f (-$so)) }
+        $songTiming = if ([Math]::Abs($so) -lt 0.05) { T 'pas' 'as is' } elseif ($so -gt 0) { T "ditunda $(Fmt '{0:0.0}' $so) dtk" "$(Fmt '{0:0.0}' $so) s later" } else { T "dimajukan $(Fmt '{0:0.0}' (-$so)) dtk" "$(Fmt '{0:0.0}' (-$so)) s earlier" }
         T "Lirik: nyala (klik untuk matikan)`nTiming lagu ini: $songTiming (scroll untuk geser)" "Lyrics: on (click to turn off)`nTiming for this song: $songTiming (scroll to shift)"
     } else { T 'Lirik: mati (klik untuk nyalakan)' 'Lyrics: off (click to turn on)' }
     if (-not ($b.ToolTip -is [System.Windows.Controls.ToolTip])) {
@@ -3022,7 +3308,7 @@ function Process-Queue {
     if ($pa) {
         $script:pendingActivity = $null
         switch ($pa.Kind) {
-            'info' { Show-Info $pa.Arg }
+            'info' { if ($pa.Ms) { Show-Info $pa.Arg $pa.Ms } else { Show-Info $pa.Arg } }
         }
         return
     }
@@ -3271,6 +3557,15 @@ $dotsCleanupTimer.Add_Tick({
     $script:dotsLeaving = @()
 })
 $script:dotsLeaving = @()
+# Tinggi daftar yang dituju: diukur dari isinya tanpa baris titik (tinggi island saat ini bisa masih
+# beranimasi, mis. lirik datang sesaat setelah daftar dibuka), ditambah $extra
+function Get-ListTargetHeight($dots, $extra) {
+    $listPanel.Measure((New-Object System.Windows.Size(($WIDE_W - 2), [double]::PositiveInfinity)))
+    $h = [Math]::Ceiling($listPanel.DesiredSize.Height) + 2
+    if ($dots) { $h -= $dots.DesiredSize.Height }
+    [Math]::Min($MAX_ISLAND_H, [Math]::Max(56.0, $h + $extra))
+}
+
 function Update-PageDots {
     if ($script:mode -ne 'list' -or $script:deleting) { return }
     $pages = Get-ListPages
@@ -3290,7 +3585,7 @@ function Update-PageDots {
         # Tinggal satu halaman: baris titik menutup, island memendek
         if ($sp -and $sp.Parent) {
             $script:pageDots = $null
-            Resize-Island $WIDE_W ([Math]::Max(56.0, $island.ActualHeight - 15)) 24 -Smooth -Ms 360
+            Resize-Island $WIDE_W (Get-ListTargetHeight $sp 0) 24 -Smooth -Ms 360
             Animate60 $sp $hp 7.0 0.0 320
             Animate60 $sp $op 1.0 0.0 220
             $sp.BeginAnimation($mp, (New-Object System.Windows.Media.Animation.ThicknessAnimation((New-Object System.Windows.Thickness(0)), (New-Object System.Windows.Duration (Ms 320)))))
@@ -3305,7 +3600,8 @@ function Update-PageDots {
         $sp.Height = 0; $sp.Opacity = 0; $sp.Margin = '0'
         [void]$listPanel.Children.Add($sp)
         $script:pageDots = $sp
-        Resize-Island $WIDE_W ($island.ActualHeight + 15) 24 -Smooth -Ms 360
+        # Titik setinggi 7 + jarak 8 di atasnya
+        Resize-Island $WIDE_W (Get-ListTargetHeight $sp 15) 24 -Smooth -Ms 360
         Animate60 $sp $hp 0.0 7.0 320
         Animate60 $sp $op 0.0 1.0 300 80
         $sp.BeginAnimation($mp, (New-Object System.Windows.Media.Animation.ThicknessAnimation((New-Object System.Windows.Thickness(0)), (New-Object System.Windows.Thickness(0, 8, 0, 0)), (New-Object System.Windows.Duration (Ms 320)))))
@@ -3482,8 +3778,8 @@ function New-LyricsPage {
         # Furigana/romaji yang sudah pernah dihitung (mis. oleh mini island) langsung dipakai
         $ready = if ($japanese -and $l.PSObject.Properties['Parts'] -and $l.PartsVer -eq $script:partsVer) { $l.Parts } else { $null }
         Set-PageLine $blk $ready
-        # Lirik biasa hanya taksiran waktu: tidak bisa dipakai untuk lompat
-        if (-not $estimated) {
+        # Lirik biasa hanya taksiran waktu: tidak bisa dipakai untuk lompat (begitu juga pemutar yang tidak mengizinkannya)
+        if (-not $estimated -and (Test-MediaSeekable)) {
             $blk.Cursor = 'Hand'
             $blk.Add_MouseLeftButtonUp({
                 param($s, $e)
@@ -3704,6 +4000,12 @@ function Show-List([switch]$Refresh) {
     $prevPage = $script:listPage
     if (-not $Refresh) { $script:listPage = $pages[0] }
     elseif ($pages -notcontains $script:listPage) { $script:listPage = if ($script:media) { 'music' } else { $pages[0] } }
+    # Tombol pin hanya ada di halaman lirik: kalau halaman itu hilang atau ditinggalkan, pin dilepas supaya
+    # daftar bisa menutup lagi saat kursor pergi (tanpa tombolnya, pin tidak bisa dilepas)
+    if ($script:listPinned -and $script:listPage -ne 'lyrics') {
+        $script:listPinned = $false
+        if (-not $script:hovering -and -not $script:overHot) { $closeTimer.Start() }
+    }
     $script:lyricsPage = $null
     $script:listClockText = $null
     if ($script:clock) { [void]$listPanel.Children.Add((New-ClockRow)) }
@@ -3715,12 +4017,10 @@ function Show-List([switch]$Refresh) {
         $card.Background = Row-Brush $script:media.Accent $true
         $card.Child = New-MediaContent
         [void]$listPanel.Children.Add($card)
-        # Lagu berganti saat halaman musik terbuka: kartu baru masuk dari kanan sambil menampak
+        # Lagu berganti saat halaman musik terbuka: kartu baru memudar masuk dengan halus di tempat
         if ($Refresh -and $prevPage -eq 'music' -and $script:listMediaKey -and $script:listMediaKey -ne $script:media.Key) {
-            $card.RenderTransform = New-Object System.Windows.Media.TranslateTransform(16, 0)
             $card.Opacity = 0
-            Animate60 $card.RenderTransform ([System.Windows.Media.TranslateTransform]::XProperty) 16 0 380
-            Animate60 $card ([System.Windows.UIElement]::OpacityProperty) 0 1 320
+            Fade-Smooth $card 1
         }
         $script:listMediaKey = $script:media.Key
     } elseif ($script:listPage -eq 'lyrics') {
@@ -3894,7 +4194,8 @@ function Add-Cell($g, $el, $col) { [System.Windows.Controls.Grid]::SetColumn($el
 
 # Pil pendek berisi satu baris teks (hasil cek update, dll)
 function Show-Info($text, $ms = 2800) {
-    if (-not (Can-ShowActivity)) { $script:pendingActivity = @{ Kind = 'info'; Arg = $text }; return }
+    # Ditunda (mis. sedang ada pop-up): lamanya ikut disimpan ("Mengunduh update..." harus tampil 60 detik, bukan 2,8)
+    if (-not (Can-ShowActivity)) { $script:pendingActivity = @{ Kind = 'info'; Arg = $text; Ms = $ms }; return }
     $g = New-Columns 'Auto', '*'
     $g.Margin = '14,0,16,0'
     Add-Cell $g (New-Glyph $GLYPH_INFO 13 '#D9FFFFFF') 0
@@ -3979,8 +4280,9 @@ function New-BatteryIcon($pct, $color) {
     $sp
 }
 
+# $true kalau pilnya benar-benar tampil (tidak bisa saat ada pop-up / aplikasi fullscreen)
 function Show-Battery($pct, $charging) {
-    if (-not (Can-ShowActivity)) { return }
+    if (-not (Can-ShowActivity)) { return $false }
     $color = if ($charging) { Rgb 48 209 88 } elseif ($pct -le 10) { Rgb 255 69 58 } else { Rgb 255 159 10 }
     $g = New-Columns '*', 'Auto', 'Auto'
     $g.Margin = '16,0,14,0'
@@ -3995,6 +4297,7 @@ function Show-Battery($pct, $charging) {
     Add-Cell $g $right 1
     Add-Cell $g (New-BatteryIcon $pct $color) 2
     Show-Activity 'battery' $g 250 36 $color 2800
+    $true
 }
 
 $script:powerLine = $null
@@ -4005,12 +4308,13 @@ function Check-Power {
     if ($ps.BatteryChargeStatus -band [System.Windows.Forms.BatteryChargeStatus]::NoSystemBattery) { return }
     $pct = [int][Math]::Round([Math]::Min(1.0, $ps.BatteryLifePercent) * 100)
     $online = "$($ps.PowerLineStatus)" -eq 'Online'
-    if ($null -ne $script:powerLine -and $online -and -not $script:powerLine) { Show-Battery $pct $true }
+    if ($null -ne $script:powerLine -and $online -and -not $script:powerLine) { [void](Show-Battery $pct $true) }
     $script:powerLine = $online
-    # Peringatan baterai lemah sekali di 20% dan sekali di 10% (diulang lagi setelah dicas)
+    # Peringatan baterai lemah sekali di 20% dan sekali di 10% (diulang lagi setelah dicas). Baru dianggap sudah
+    # diperingatkan kalau pilnya benar-benar tampil: saat main game fullscreen, peringatannya menunggu, tidak hilang.
     if ($online) { $script:lowWarned = 100 }
-    elseif ($pct -le 10 -and $script:lowWarned -gt 10) { $script:lowWarned = 10; Show-Battery $pct $false }
-    elseif ($pct -le 20 -and $script:lowWarned -gt 20) { $script:lowWarned = 20; Show-Battery $pct $false }
+    elseif ($pct -le 10 -and $script:lowWarned -gt 10) { if (Show-Battery $pct $false) { $script:lowWarned = 10 } }
+    elseif ($pct -le 20 -and $script:lowWarned -gt 20) { if (Show-Battery $pct $false) { $script:lowWarned = 20 } }
 }
 
 # ---------- Headset Bluetooth ----------
@@ -4135,28 +4439,29 @@ function Check-Sensors {
 # Dimulai dari menu klik kanan. Tanpa lagu: mini island menampilkan sisa waktu. Saat lagu diputar: lagu
 # tetap di mini island, timer di gelembung kecil di sebelah kanannya. Kontrol (jeda/hentikan) ada di daftar.
 $script:clock = $null
+# Semua waktu timer memakai UTC: jam lokal bisa melompat (pergantian musim panas, jam diubah), UTC tidak
 function Start-Countdown($min) {
-    $script:clock = @{ Kind = 'timer'; Running = $true; End = (Get-Date).AddMinutes($min); Left = [TimeSpan]::FromMinutes($min) }
+    $script:clock = @{ Kind = 'timer'; Running = $true; End = [DateTime]::UtcNow.AddMinutes($min); Left = [TimeSpan]::FromMinutes($min) }
     Clock-Changed
 }
 function Start-Stopwatch {
-    $script:clock = @{ Kind = 'stopwatch'; Running = $true; Start = (Get-Date); Acc = [TimeSpan]::Zero }
+    $script:clock = @{ Kind = 'stopwatch'; Running = $true; Start = [DateTime]::UtcNow; Acc = [TimeSpan]::Zero }
     Clock-Changed
 }
 function Get-ClockSpan {
     $c = $script:clock
     if (-not $c) { return [TimeSpan]::Zero }
-    if ($c.Kind -eq 'timer') { if ($c.Running) { $c.End - (Get-Date) } else { $c.Left } }
-    else { if ($c.Running) { $c.Acc + ((Get-Date) - $c.Start) } else { $c.Acc } }
+    if ($c.Kind -eq 'timer') { if ($c.Running) { $c.End - [DateTime]::UtcNow } else { $c.Left } }
+    else { if ($c.Running) { $c.Acc + ([DateTime]::UtcNow - $c.Start) } else { $c.Acc } }
 }
 function Toggle-Clock {
     $c = $script:clock
     if (-not $c) { return }
     if ($c.Running) {
-        if ($c.Kind -eq 'timer') { $c.Left = $c.End - (Get-Date) } else { $c.Acc = $c.Acc + ((Get-Date) - $c.Start) }
+        if ($c.Kind -eq 'timer') { $c.Left = $c.End - [DateTime]::UtcNow } else { $c.Acc = $c.Acc + ([DateTime]::UtcNow - $c.Start) }
         $c.Running = $false
     } else {
-        if ($c.Kind -eq 'timer') { $c.End = (Get-Date) + $c.Left } else { $c.Start = Get-Date }
+        if ($c.Kind -eq 'timer') { $c.End = [DateTime]::UtcNow + $c.Left } else { $c.Start = [DateTime]::UtcNow }
         $c.Running = $true
     }
     Clock-Changed
@@ -4237,7 +4542,7 @@ function Timer-Done {
     # Ikon berdenyut pelan selama pemberitahuan tampil
     $pulse = New-Object System.Windows.Media.Animation.DoubleAnimation(1.0, 0.35, (New-Object System.Windows.Duration (Ms 650)))
     $pulse.AutoReverse = $true; $pulse.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
-    [System.Windows.Media.Animation.Timeline]::SetDesiredFrameRate($pulse, $ANIM_FPS)
+    [System.Windows.Media.Animation.Timeline]::SetDesiredFrameRate($pulse, $AMBIENT_FPS)
     $gl.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $pulse)
     Track-Anim $gl $gl ([System.Windows.UIElement]::OpacityProperty)
     Show-Activity 'timerdone' $g 260 52 $CLOCK_COLOR 12000 'dismiss'
@@ -4315,20 +4620,24 @@ $UPDATE_CHECK_JOB = {
         $notes = @()
         if ([version]$latest -gt [version]$cur) {
             # Commit yang mengubah VERSION, terbaru dulu; berhenti di versi yang sedang dipakai
-            # (disimpan dulu ke variabel: ConvertFrom-Json di PowerShell 5.1 tidak memecah array lewat pipa)
-            $commits = ConvertFrom-Json (Get-Text "$api/commits?path=VERSION&per_page=15")
-            foreach ($c in $commits) {
-                $v = (Get-Text "$raw/$($c.sha)/VERSION").Trim()
-                if ([version]$v -le [version]$cur) { break }
-                $notes += (($c.commit.message -split "`n")[0]).Trim()
-            }
+            # (disimpan dulu ke variabel: ConvertFrom-Json di PowerShell 5.1 tidak memecah array lewat pipa).
+            # Daftar perubahan hanya pelengkap: kalau gagal diambil (mis. batas API GitHub), update tetap ditawarkan.
+            try {
+                $commits = ConvertFrom-Json (Get-Text "$api/commits?path=VERSION&per_page=15")
+                foreach ($c in $commits) {
+                    $v = (Get-Text "$raw/$($c.sha)/VERSION").Trim()
+                    if ([version]$v -le [version]$cur) { break }
+                    $notes += (($c.commit.message -split "`n")[0]).Trim()
+                }
+            } catch {}
         }
         @{ Latest = $latest; Notes = $notes }
     } catch { @{ Error = "$_" } }
 }
 
 function Start-UpdateCheck([switch]$Manual) {
-    if ($script:updateJob) { return }
+    # Cek otomatis masih berjalan: cukup tandai sebagai manual supaya hasilnya tetap ditampilkan
+    if ($script:updateJob) { if ($Manual) { $script:updateJob.Manual = $true }; return }
     $script:lastUpdateCheck = Get-Date
     $script:updateJob = Start-BgJob $UPDATE_CHECK_JOB @($APP_VERSION, $REPO_RAW, $REPO_API)
     $script:updateJob.Manual = [bool]$Manual
@@ -4418,14 +4727,22 @@ $UPDATE_DOWNLOAD_JOB = {
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         [IO.Compression.ZipFile]::ExtractToDirectory($zip, (Join-Path $tmp 'x'))
         $src = Get-ChildItem (Join-Path $tmp 'x') -Directory | Select-Object -First 1
-        $text = [IO.File]::ReadAllText((Join-Path $src.FullName 'island.ps1'))
+        $file = Join-Path $src.FullName 'island.ps1'
+        $text = [IO.File]::ReadAllText($file)
         if ($text -notmatch "APP_VERSION = '([0-9.]+)'") { throw 'versi tidak terbaca' }
         $ver = $Matches[1]
+        # Diperiksa persis seperti powershell -File akan membacanya: file tanpa BOM dibaca sebagai ANSI, jadi
+        # satu huruf non-ASCII saja bisa membuat skrip gagal jalan walau lolos kalau dibaca sebagai UTF-8
+        if ([Text.Encoding]::GetEncoding(28591).GetString([IO.File]::ReadAllBytes($file)) -match '[^\x00-\x7F]') { throw 'skrip berisi karakter non-ASCII' }
         $tokens = $null; $errs = $null
-        [void][System.Management.Automation.Language.Parser]::ParseInput($text, [ref]$tokens, [ref]$errs)
+        [void][System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$tokens, [ref]$errs)
         if (@($errs).Count) { throw "skrip rusak: $($errs[0].Message)" }
         @{ Dir = $src.FullName; Version = $ver; Tmp = $tmp }
-    } catch { @{ Error = "$_" } }
+    } catch {
+        # Unduhan gagal / rusak: folder sementaranya tidak ditinggalkan
+        if ($tmp) { Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+        @{ Error = "$_" }
+    }
 }
 
 function Start-SelfUpdate {
@@ -4581,8 +4898,8 @@ function Add-Sep($parent) { [void]$parent.Items.Add((New-Object System.Windows.C
 
 function Format-Delay($d) {
     if ([Math]::Abs($d) -lt 0.05) { T 'pas' '0 s' }
-    elseif ($d -gt 0) { T ("+{0:0.0#} dtk" -f $d) ("+{0:0.0#} s" -f $d) }
-    else { T ("{0:0.0#} dtk" -f $d) ("{0:0.0#} s" -f $d) }
+    elseif ($d -gt 0) { T "$(Fmt '+{0:0.0#}' $d) dtk" "$(Fmt '+{0:0.0#}' $d) s" }
+    else { T "$(Fmt '{0:0.0#}' $d) dtk" "$(Fmt '{0:0.0#}' $d) s" }
 }
 
 # Opsi nyala/mati: Tag = nama pengaturan
@@ -4600,6 +4917,7 @@ $onToggle = {
         'Romaji' { $script:lyricIdx = -2; if ($script:mode -eq 'list') { Show-List -Refresh } }
         'Furigana' { $script:lyricIdx = -2; if ($script:mode -eq 'list') { Show-List -Refresh } }
         'MicCam' { Check-Sensors }
+        'AppVolume' { Update-VolumeUI }
         'Glow' {
             $showing = $script:mode -eq 'media' -or ($script:mode -eq 'idle' -and $script:miniOn -and $script:miniKey -ne 'clock') -or ($script:mode -eq 'list' -and $script:listPage -ne 'notif')
             if ($script:media -and $showing) { Set-Theme $script:media.Accent }
@@ -4643,6 +4961,7 @@ function Build-Menu {
     }
     Add-Sep $menu
 
+    [void](Add-MI $menu (New-MI (T 'Volume musik: aplikasi pemutarnya saja' 'Music volume: player app only') 'AppVolume' $onToggle -Check -Checked $script:settings.AppVolume))
     $sm = Add-MI $menu (New-MI (T 'Tampilkan' 'Show'))
     [void](Add-MI $sm (New-MI (T 'Perubahan volume & kecerahan' 'Volume & brightness changes') 'VolumeOsd' $onToggle -Check -Checked $script:settings.VolumeOsd))
     [void](Add-MI $sm (New-MI (T 'Mengisi daya & baterai lemah' 'Charging & low battery') 'Charging' $onToggle -Check -Checked $script:settings.Charging))
@@ -4770,13 +5089,17 @@ $pollTimer.Interval = Ms 1000
 $script:pollCount = 0
 $pollTimer.Add_Tick({
     $script:pollCount++
-    Update-Position; Update-ZOrder; Poll; Prune-Anims
+    # Tiap langkah dijaga sendiri: error di satu bagian tidak boleh menghentikan sisanya
+    try { Update-Position } catch { Log "position: $_" }
+    try { Update-ZOrder } catch { Log "zorder: $_" }
+    try { Poll } catch { Log "poll tick: $_" }
+    try { Prune-Anims } catch { Log "anims: $_" }
     try { Check-Sensors } catch { Log "sensors: $_" }
     try { Check-Power } catch { Log "power: $_" }
     try { Check-Update } catch { Log "update: $_" }
     # Output audio bisa pindah (headset dicolok): pantau perangkat yang baru
     if ($script:volWatcher -and ($script:pollCount % 3) -eq 0) {
-        $script:volWatcher.Check()
+        try { $script:volWatcher.Check() } catch { Log "volume watcher: $_" }
         try { Check-AudioDevice } catch { Log "headset: $_" }
     }
 })
@@ -5020,7 +5343,7 @@ $popupTimer.Add_Tick({
     $popupTimer.Stop()
     $n = $script:current
     # Notifikasi WeChat (dari kedipan taskbar) bukan notifikasi Windows: cukup ditutup
-    if ($n -and -not $n.Exe) { Remove-Notif $n.Id }
+    if ($n -and -not $n.Flash) { Remove-Notif $n.Id }
     $island.RenderTransform = [System.Windows.Media.Transform]::Identity
     $island.BorderBrush = $GLASS_BORDER
     Go-Idle
@@ -5131,6 +5454,21 @@ $island.Add_PreviewMouseLeftButtonUp({
     # Lepas klik setelah swipe jangan dianggap klik baris (membuka aplikasi)
     if ($script:swiped) { $script:swiped = $false; $e.Handled = $true }
 })
+# Tangkapan mouse hilang di tengah tarikan (klik kanan membuka menu, Alt-Tab): baris / pop-up kembali ke
+# tempatnya dan status tarikan dilepas (kalau tidak, daftar tidak pernah menutup sendiri lagi). Pelepasan
+# normal lewat End-RowDrag sudah mematikan rowDragging lebih dulu, jadi tidak ikut terpicu di sini.
+$island.Add_LostMouseCapture({
+    param($s, $e)
+    if (-not $script:rowDragging) { return }
+    $row = $script:dragRow; $isPopup = $script:dragPopup
+    $script:rowDragging = $false; $script:dragRow = $null; $script:dragPopup = $false; $script:swipeStart = $null
+    if (-not $row) { return }
+    if ($row.RenderTransform -is [System.Windows.Media.TranslateTransform]) {
+        Animate $row.RenderTransform ([System.Windows.Media.TranslateTransform]::XProperty) 0 220
+    }
+    Animate $row ([System.Windows.UIElement]::OpacityProperty) 1 200
+    if ($isPopup) { $island.BorderBrush = $GLASS_BORDER } else { $row.Background = Row-Brush $row.Tag.N.Accent $false }
+})
 $window.Add_Loaded({
     Update-Position
     Show-Intro
@@ -5164,11 +5502,16 @@ $window.Add_Closed({
     if ($script:brightWatcher) { $script:brightWatcher.Stop() }
 })
 
-# Error tak terduga di event handler tidak boleh mematikan island: catat lalu lanjut
+# Error tak terduga di event handler tidak boleh mematikan island: catat lalu lanjut. Timer berulang yang
+# tick-nya error berhenti berdetak walau IsEnabled tetap True (WPF baru menjadwalkan tick berikutnya setelah
+# tick selesai normal, dan Start() pada timer yang dianggap masih jalan tidak berbuat apa-apa): jalankan ulang.
 $window.Dispatcher.add_UnhandledException({
     param($s, $e)
     Log "ui error: $($e.Exception.Message)"
     $e.Handled = $true
+    foreach ($v in Get-Variable -Scope Script) {
+        if ($v.Value -is [System.Windows.Threading.DispatcherTimer] -and $v.Value.IsEnabled) { $v.Value.Stop(); $v.Value.Start() }
+    }
 })
 
 $exitCode = 0

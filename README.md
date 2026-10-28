@@ -12,8 +12,10 @@ and what's playing, instead of the toasts in the bottom-right corner.
   one (x or swipe right) or clear all.
 - **WeChat** (which doesn't use Windows notifications) is detected from its flashing taskbar button.
 - **Now Playing** for Spotify, YouTube Music / browsers, Apple Music and any app that shows in the
-  Windows media flyout: cover, title, play/pause/next, volume (scroll on the card), and a wavy
-  progress bar in the album's colors. **Click or drag the wave to jump** to another part of the song.
+  Windows media flyout: cover, title, play/pause/next, the **player's own volume** (scroll on the card;
+  your other apps and Windows' volume stay as they are, and for a browser it's the whole browser), and a
+  wavy progress bar in the album's colors. **Click or drag the wave to jump** to another part of the song.
+  Long titles and artist names scroll, and the card crossfades smoothly when the song changes.
   When several apps play at once, the one you can actually hear is shown: muted autoplay videos
   (Facebook, Instagram, ...) don't take over your music. For YouTube videos, the song and artist are
   read from the video title.
@@ -38,7 +40,8 @@ and what's playing, instead of the toasts in the bottom-right corner.
   and saved lyrics, and restarts itself.
 - **English or Indonesian** interface, and a choice of monitor if you have more than one.
 - Stays on top of other windows, but steps aside for fullscreen games and videos.
-- Light: about 1-2% CPU.
+- Light: well under 1% of your CPU when nothing is playing, about 2-3% while music plays (measured on a
+  6-core PC with a 180 Hz screen).
 
 ## Install
 
@@ -64,6 +67,7 @@ Double-click **`Uninstall.cmd`** (in the downloaded folder or in `%LOCALAPPDATA%
 
 - Lyrics on/off, furigana and romaji on/off, and lyric timing for all songs (if lyrics are early or late for your
   speakers/headset)
+- Music volume: the player app only (default), or turn it off to have the music card change Windows' volume
 - Timer (1-60 minutes) and stopwatch
 - Show: volume & brightness changes, charging & low battery, microphone / camera dots, Bluetooth
   headset, album color glow
