@@ -9,7 +9,7 @@ try { if ((Get-Item $logFile -ErrorAction Stop).Length -gt 512KB) { Remove-Item 
 function Log($msg) { try { Add-Content -Path $logFile -Value ("{0:yyyy-MM-dd HH:mm:ss} {1}" -f (Get-Date), $msg) } catch {} }
 
 # Versi ini dibandingkan dengan file VERSION di GitHub untuk cek update
-$APP_VERSION = '1.2.3'
+$APP_VERSION = '1.2.4'
 $REPO_URL = 'https://github.com/nkzwsn/mini-island-windows'
 
 # Pengaturan yang diingat antar-restart (diatur lewat menu klik kanan)
@@ -2207,6 +2207,8 @@ function Save-LyricsEntry($e) {
 function Lyrics-Arrived {
     $script:lyricIdx = -2
     if ($script:miniOn) { $lyricTimer.Start() }
+    # Daftar terbuka: titik halaman lirik muncul
+    if ($script:mode -eq 'list') { Update-PageDots }
 }
 
 function Request-Lyrics {
@@ -2471,7 +2473,7 @@ function Get-LyricParts($text) {
         $items.Add([PSCustomObject]@{ D = $d; Y = $w.YomiText; Phrase = $w.IsPhraseStart })
     }
     $romaji = $null
-    if ($items.Count -and $script:settings.Romaji) {
+    if ($items.Count) {
         $parts = New-Object System.Collections.Generic.List[string]
         foreach ($it in $items) {
             $d = $it.D; $y = $it.Y
@@ -2508,7 +2510,7 @@ function New-LyricLayer($parts, $brush) {
     $sp = New-Object System.Windows.Controls.StackPanel
     $sp.Orientation = 'Horizontal'; $sp.HorizontalAlignment = 'Center'
     [void]$outer.Children.Add($sp)
-    if ($parts.Romaji) {
+    if ($parts.Romaji -and $script:settings.Romaji) {
         $ro = New-Object System.Windows.Controls.TextBlock
         $ro.Text = $parts.Romaji; $ro.FontSize = 8.5; $ro.Foreground = $brush; $ro.Opacity = 0.85
         $ro.HorizontalAlignment = 'Center'; $ro.Margin = '0,-1,0,0'
@@ -2730,6 +2732,7 @@ function New-LyricsToggle {
         Save-Settings
         if ($script:settings.Lyrics) { Request-Lyrics }
         Set-LyricsToggleLook $s
+        Update-PageDots
     })
     # Scroll di tombol ini menggeser timing lirik lagu ini 0,1 detik (ke atas = lirik lebih awal); geseran
     # untuk semua lagu ada di menu klik kanan. Ditangani di sini supaya tidak sampai ke scroll volume.
@@ -3007,20 +3010,93 @@ function Get-ListPages {
     , $p
 }
 
+function New-PageDot($p) {
+    $d = New-Object System.Windows.Shapes.Ellipse
+    $on = $p -eq $script:listPage
+    $d.Width = $(if ($on) { 7 } else { 6 }); $d.Height = $d.Width; $d.Margin = '4,0'
+    $d.Fill = Brush $(if ($on) { '#FFFFFFFF' } else { '#55FFFFFF' })
+    $d.Cursor = 'Hand'; $d.Tag = $p; $d.VerticalAlignment = 'Center'
+    $d.ToolTip = switch ($p) { 'notif' { T 'Notifikasi' 'Notifications' } 'music' { T 'Musik' 'Music' } default { T 'Lirik' 'Lyrics' } }
+    $d.Add_MouseLeftButtonUp({ param($s, $e) $e.Handled = $true; Switch-ListPage $s.Tag })
+    $d
+}
 function New-PageDots {
     $sp = New-Object System.Windows.Controls.StackPanel
-    $sp.Orientation = 'Horizontal'; $sp.HorizontalAlignment = 'Center'; $sp.Margin = '0,8,0,0'
-    foreach ($p in (Get-ListPages)) {
-        $d = New-Object System.Windows.Shapes.Ellipse
-        $on = $p -eq $script:listPage
-        $d.Width = $(if ($on) { 7 } else { 6 }); $d.Height = $d.Width; $d.Margin = '4,0'
-        $d.Fill = Brush $(if ($on) { '#FFFFFFFF' } else { '#55FFFFFF' })
-        $d.Cursor = 'Hand'; $d.Tag = $p
-        $d.ToolTip = switch ($p) { 'notif' { T 'Notifikasi' 'Notifications' } 'music' { T 'Musik' 'Music' } default { T 'Lirik' 'Lyrics' } }
-        $d.Add_MouseLeftButtonUp({ param($s, $e) $e.Handled = $true; Switch-ListPage $s.Tag })
-        [void]$sp.Children.Add($d)
-    }
+    $sp.Orientation = 'Horizontal'; $sp.HorizontalAlignment = 'Center'; $sp.Margin = '0,8,0,0'; $sp.Height = 7
+    foreach ($p in (Get-ListPages)) { [void]$sp.Children.Add((New-PageDot $p)) }
     $sp
+}
+
+# Halaman bertambah/berkurang saat daftar terbuka (lirik dinyalakan/dimatikan, lirik selesai dimuat):
+# titik halaman muncul/hilang dengan animasi, tinggi island menyesuaikan halus. Kalau halaman yang
+# sedang dibuka hilang, daftar bergeser ke halaman musik.
+$script:pageDots = $null
+$dotsCleanupTimer = New-Object System.Windows.Threading.DispatcherTimer
+$dotsCleanupTimer.Interval = Ms 340
+$dotsCleanupTimer.Add_Tick({
+    $dotsCleanupTimer.Stop()
+    foreach ($el in @($script:dotsLeaving)) { if ($el.Parent) { $el.Parent.Children.Remove($el) } }
+    $script:dotsLeaving = @()
+})
+$script:dotsLeaving = @()
+function Update-PageDots {
+    if ($script:mode -ne 'list' -or $script:deleting) { return }
+    $pages = Get-ListPages
+    if ($pages -notcontains $script:listPage) {
+        $target = if ($pages -contains 'music') { 'music' } else { $pages[0] }
+        $script:listPage = $target
+        Show-List -Refresh
+        Slide-ListIn $false
+        return
+    }
+    $sp = $script:pageDots
+    $wp = [System.Windows.FrameworkElement]::WidthProperty
+    $hp = [System.Windows.FrameworkElement]::HeightProperty
+    $op = [System.Windows.UIElement]::OpacityProperty
+    $mp = [System.Windows.FrameworkElement]::MarginProperty
+    if ($pages.Count -lt 2) {
+        # Tinggal satu halaman: baris titik menutup, island memendek
+        if ($sp -and $sp.Parent) {
+            $script:pageDots = $null
+            Resize-Island $WIDE_W ([Math]::Max(56.0, $island.ActualHeight - 15)) 24 -Smooth -Ms 360
+            Animate60 $sp $hp 7.0 0.0 320
+            Animate60 $sp $op 1.0 0.0 220
+            $sp.BeginAnimation($mp, (New-Object System.Windows.Media.Animation.ThicknessAnimation((New-Object System.Windows.Thickness(0)), (New-Object System.Windows.Duration (Ms 320)))))
+            $script:dotsLeaving += $sp
+            $dotsCleanupTimer.Stop(); $dotsCleanupTimer.Start()
+        }
+        return
+    }
+    if (-not $sp -or -not $sp.Parent) {
+        # Baris titik muncul: island memanjang, titik membesar & menampak
+        $sp = New-PageDots
+        $sp.Height = 0; $sp.Opacity = 0; $sp.Margin = '0'
+        [void]$listPanel.Children.Add($sp)
+        $script:pageDots = $sp
+        Resize-Island $WIDE_W ($island.ActualHeight + 15) 24 -Smooth -Ms 360
+        Animate60 $sp $hp 0.0 7.0 320
+        Animate60 $sp $op 0.0 1.0 300 80
+        $sp.BeginAnimation($mp, (New-Object System.Windows.Media.Animation.ThicknessAnimation((New-Object System.Windows.Thickness(0)), (New-Object System.Windows.Thickness(0, 8, 0, 0)), (New-Object System.Windows.Duration (Ms 320)))))
+        return
+    }
+    # Titik halaman yang baru: menyelip masuk dari ukuran nol
+    $have = @($sp.Children | Where-Object { $_.Tag -and $script:dotsLeaving -notcontains $_ } | ForEach-Object { $_.Tag })
+    for ($i = 0; $i -lt $pages.Count; $i++) {
+        if ($have -contains $pages[$i]) { continue }
+        $d = New-PageDot $pages[$i]
+        $w = $d.Width; $d.Width = 0; $d.Height = 0; $d.Opacity = 0; $d.Margin = '0'
+        $sp.Children.Insert([Math]::Min($i, $sp.Children.Count), $d)
+        Animate60 $d $wp 0.0 $w 300; Animate60 $d $hp 0.0 $w 300; Animate60 $d $op 0.0 1.0 300
+        $d.BeginAnimation($mp, (New-Object System.Windows.Media.Animation.ThicknessAnimation((New-Object System.Windows.Thickness(0)), (New-Object System.Windows.Thickness(4, 0, 4, 0)), (New-Object System.Windows.Duration (Ms 300)))))
+    }
+    # Titik halaman yang hilang: mengecil lalu dibuang
+    foreach ($d in @($sp.Children)) {
+        if ($pages -contains $d.Tag -or $script:dotsLeaving -contains $d) { continue }
+        Animate60 $d $wp ([double]$d.ActualWidth) 0.0 280; Animate60 $d $hp ([double]$d.ActualHeight) 0.0 280; Animate60 $d $op 1.0 0.0 220
+        $d.BeginAnimation($mp, (New-Object System.Windows.Media.Animation.ThicknessAnimation((New-Object System.Windows.Thickness(0)), (New-Object System.Windows.Duration (Ms 280)))))
+        $script:dotsLeaving += $d
+        $dotsCleanupTimer.Stop(); $dotsCleanupTimer.Start()
+    }
 }
 
 # Pindah halaman dengan animasi geser. $target: nama halaman, 'next' / 'prev', atau kosong (berikutnya, memutar)
@@ -3065,10 +3141,13 @@ function Set-PageLine($block, $parts, [switch]$Fade) {
     $brush = $block.Tag.Brush
     $block.Tag.Parts = $parts
     $block.Children.Clear()
-    $extras = New-Object System.Collections.Generic.List[object]
+    $rubies = New-Object System.Collections.Generic.List[object]
     $wp = New-Object System.Windows.Controls.WrapPanel
     [void]$block.Children.Add($wp)
-    $ruby = $parts -and $parts.HasRuby -and $script:settings.Furigana
+    # Furigana & romaji selalu ada di baris; yang dimatikan bertinggi 0. Tombol tinggal menganimasikan
+    # tingginya, tanpa membangun ulang baris (membangun ulang membuat halaman tersendat & melompat).
+    $furi = [bool]$script:settings.Furigana
+    $ruby = $parts -and $parts.HasRuby
     $segs = if ($parts) { $parts.Segs } else { @([PSCustomObject]@{ Text = $block.Tag.Line.Text; Ruby = $null }) }
     foreach ($sg in $segs) {
         $col = New-Object System.Windows.Controls.StackPanel
@@ -3078,8 +3157,9 @@ function Set-PageLine($block, $parts, [switch]$Fade) {
             $rt.Text = if ($sg.Ruby) { $sg.Ruby } else { ' ' }
             $rt.FontSize = 9; $rt.LineStackingStrategy = 'BlockLineHeight'; $rt.LineHeight = 10; $rt.Height = 10
             $rt.HorizontalAlignment = 'Center'; $rt.Foreground = $brush
+            Use-PageScale $rt $script:lyricsPage.RubyScale
             [void]$col.Children.Add($rt)
-            if ($sg.Ruby) { $extras.Add($rt) }
+            $rubies.Add($rt)
         }
         $bt = New-Object System.Windows.Controls.TextBlock
         $bt.Text = $sg.Text; $bt.FontSize = 14.5; $bt.FontWeight = 'SemiBold'; $bt.Foreground = $brush
@@ -3087,17 +3167,34 @@ function Set-PageLine($block, $parts, [switch]$Fade) {
         [void]$col.Children.Add($bt)
         [void]$wp.Children.Add($col)
     }
-    if ($parts -and $parts.Romaji -and $script:settings.Romaji) {
-        $ro = New-Object System.Windows.Controls.TextBlock
-        $ro.Text = $parts.Romaji; $ro.FontSize = 10.5; $ro.Foreground = $brush; $ro.Opacity = 0.8
-        $ro.TextWrapping = 'Wrap'; $ro.Margin = '0,1,0,0'
+    $ro = $null
+    if ($parts -and $parts.Romaji) {
+        $rt2 = New-Object System.Windows.Controls.TextBlock
+        $rt2.Text = $parts.Romaji; $rt2.FontSize = 10.5; $rt2.Foreground = $brush
+        $rt2.TextWrapping = 'Wrap'; $rt2.Margin = '0,1,0,0'
+        Use-PageScale $rt2 $script:lyricsPage.RomajiScale
+        # Romaji sedikit lebih redup dari teks utamanya
+        $ro = New-Object System.Windows.Controls.Border
+        $ro.Opacity = 0.8; $ro.Child = $rt2
         [void]$block.Children.Add($ro)
-        $extras.Add($ro)
     }
-    # Furigana/romaji yang baru muncul memudar masuk
-    $op = [System.Windows.UIElement]::OpacityProperty
-    if ($Fade) { foreach ($x in $extras) { $to = [double]$x.Opacity; $x.Opacity = 0; Animate60 $x $op 0.0 $to 260 } }
-    $block.Tag.Extras = $extras
+    $block.Tag.Rubies = $rubies; $block.Tag.Romaji = $ro
+    # Baris yang baru mendapat furigana/romaji: tambahannya memudar masuk
+    if ($Fade) {
+        $op = [System.Windows.UIElement]::OpacityProperty
+        foreach ($x in @($block.Children)) { if ($x -isnot [System.Windows.Controls.WrapPanel]) { $x.Opacity = 0; Animate60 $x $op 0.0 0.8 260 } }
+        if ($rubies.Count) { $wp.Opacity = 0.6; Animate60 $wp $op 0.6 1.0 260 }
+    }
+}
+
+# Semua furigana (dan semua romaji) di halaman memakai satu ScaleTransform bersama sebagai LayoutTransform,
+# opacity-nya mengikuti skala itu. Menyalakan/mematikan = satu animasi saja (bukan ratusan per potongan
+# teks), dan baris memendek/memanjang mulus karena tinggi tata letaknya ikut skala.
+function Use-PageScale($el, $scale) {
+    $el.LayoutTransform = $scale
+    $b = New-Object System.Windows.Data.Binding('ScaleY')
+    $b.Source = $scale
+    [void]$el.SetBinding([System.Windows.UIElement]::OpacityProperty, $b)
 }
 
 # Tombol bulat kecil di pojok kartu lirik; $on = menyala
@@ -3142,10 +3239,14 @@ function New-LyricsPage {
     $estimated = $lines.Count -and $lines[0].Estimated
     $japanese = @($lines | Where-Object { $_.Text -match $JAPANESE }).Count -gt 0
     $blocks = New-Object System.Collections.Generic.List[object]
+    $pageRuby = New-Object System.Windows.Media.ScaleTransform(1, $(if ($script:settings.Furigana) { 1 } else { 0 }))
+    $pageRomaji = New-Object System.Windows.Media.ScaleTransform(1, $(if ($script:settings.Romaji) { 1 } else { 0 }))
+    # Set-PageLine di bawah sudah butuh skala ini (halaman lengkapnya diisi setelah semua baris dibuat)
+    $script:lyricsPage = @{ RubyScale = $pageRuby; RomajiScale = $pageRomaji }
     foreach ($l in $lines) {
         $blk = New-Object System.Windows.Controls.StackPanel
         $blk.Margin = '18,5,18,5'; $blk.Background = Brush '#01000000'
-        $blk.Tag = [PSCustomObject]@{ Line = $l; Brush = (New-Object System.Windows.Media.SolidColorBrush($DIM_LINE)); Parts = $null; Extras = $null }
+        $blk.Tag = [PSCustomObject]@{ Line = $l; Brush = (New-Object System.Windows.Media.SolidColorBrush($DIM_LINE)); Parts = $null; Rubies = $null; Romaji = $null }
         # Furigana/romaji yang sudah pernah dihitung (mis. oleh mini island) langsung dipakai
         $ready = if ($japanese -and $l.PSObject.Properties['Parts'] -and $l.PartsVer -eq $script:partsVer) { $l.Parts } else { $null }
         Set-PageLine $blk $ready
@@ -3192,6 +3293,7 @@ function New-LyricsPage {
     [void]$layers.Children.Add($bar)
 
     $script:lyricsPage = @{ Lines = $lines; Blocks = $blocks; Tops = $null; Shift = $tt; Cur = -2; Root = $card; Panel = $sp
+        RubyScale = $pageRuby; RomajiScale = $pageRomaji; Layers = $layers; Fade = $fade
         Pending = $(if ($japanese) { New-Object System.Collections.Generic.List[int] } else { $null }) }
     Measure-LyricsPage
     Update-LyricsPage -Instant
@@ -3239,17 +3341,13 @@ $pagePartsTimer.Add_Tick({
         $blk = $lp.Blocks[$i]
         if ($blk.Tag.Line.Text -match $JAPANESE) { Set-PageLine $blk (Get-LineParts $blk.Tag.Line) -Fade }
     }
-    Settle-LyricsPage
+    # Baris yang terisi kebanyakan di luar kartu; baris aktif dikunci di tengah (tanpa animasi gulir yang
+    # dimulai ulang tiap batch, yang membuat halaman bergoyang naik-turun)
+    Measure-LyricsPage
+    $lp.Shift.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty, $null)
+    $lp.Shift.Y = Get-LyricsPageTarget $lp $lp.Cur
 })
 
-# Tinggi baris berubah (furigana/romaji): ukur ulang, lalu geser halus supaya baris aktif kembali ke tempatnya
-function Settle-LyricsPage {
-    $lp = $script:lyricsPage
-    if (-not $lp) { return }
-    Measure-LyricsPage
-    $target = Get-LyricsPageTarget $lp $lp.Cur
-    Animate60 $lp.Shift ([System.Windows.Media.TranslateTransform]::YProperty) $lp.Shift.Y $target 380
-}
 
 function Update-LyricsPage([switch]$Instant) {
     $lp = $script:lyricsPage
@@ -3287,39 +3385,55 @@ $lyricsPageTimer.Add_Tick({ Update-LyricsPage })
 # Furigana / romaji nyala-mati (berlaku juga untuk mini island)
 # Di halaman lirik tidak dibangun ulang: yang dimatikan memudar keluar dulu, yang dinyalakan memudar masuk,
 # baris-baris bergeser halus ke posisi barunya.
+# Di halaman lirik: tampilan sekarang difoto, tata letak baru dipasang sekaligus (baris aktif tetap di
+# tengah), lalu foto lama memudar keluar sementara tampilan baru memudar masuk. Tidak ada guliran
+# naik-turun, dan tata letak hanya dihitung sekali (bukan tiap frame).
 function Toggle-LyricOption($name) {
     $on = -not $script:settings.$name
     $script:settings.$name = $on
     Save-Settings
-    # Romaji dihitung bersama furigana; bacaan yang tersimpan tanpa romaji harus dihitung ulang
-    if ($name -eq 'Romaji' -and $on) { $script:partsVer++ }
     $script:lyricIdx = -2
     $lp = $script:lyricsPage
-    if (-not ($lp -and $script:mode -eq 'list' -and $script:listPage -eq 'lyrics')) { if ($script:mode -eq 'list') { Show-List -Refresh }; return }
+    if (-not ($lp -and $script:mode -eq 'list' -and $script:listPage -eq 'lyrics')) { return }
+    $snap = $null
+    try {
+        $k = 1.0
+        $src = [System.Windows.PresentationSource]::FromVisual($window)
+        if ($src) { $k = $src.CompositionTarget.TransformToDevice.M11 }
+        $w = [int][Math]::Ceiling($lp.Layers.ActualWidth * $k); $h = [int][Math]::Ceiling($lp.Layers.ActualHeight * $k)
+        if ($w -gt 0 -and $h -gt 0) {
+            $rtb = New-Object System.Windows.Media.Imaging.RenderTargetBitmap($w, $h, (96 * $k), (96 * $k), [System.Windows.Media.PixelFormats]::Pbgra32)
+            $rtb.Render($lp.Layers); $rtb.Freeze()
+            $snap = New-Object System.Windows.Controls.Image
+            $snap.Source = $rtb; $snap.Stretch = 'None'; $snap.IsHitTestVisible = $false
+            $snap.HorizontalAlignment = 'Left'; $snap.VerticalAlignment = 'Top'
+        }
+    } catch { Log "lyrics snapshot: $_" }
     Update-PageToggles
-    if ($name -eq 'Romaji' -and $on) {
-        # Romaji muncul bertahap mulai dari baris sekarang (perlu dihitung)
-        Queue-PageParts; $pagePartsTimer.Start()
-        return
+    $sc = if ($name -eq 'Furigana') { $lp.RubyScale } else { $lp.RomajiScale }
+    $sc.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty, $null)
+    $sc.ScaleY = $(if ($on) { 1.0 } else { 0.0 })
+    # Tata letak baru dihitung sekarang juga (bukan di frame berikutnya), supaya posisi tengahnya tepat
+    $lp.Panel.UpdateLayout()
+    Measure-LyricsPage
+    $yp = [System.Windows.Media.TranslateTransform]::YProperty
+    $lp.Shift.BeginAnimation($yp, $null)
+    $lp.Shift.Y = Get-LyricsPageTarget $lp $lp.Cur
+    $op = [System.Windows.UIElement]::OpacityProperty
+    if ($snap) {
+        [void]$lp.Layers.Children.Add($snap)
+        Animate60 $snap $op 1.0 0.0 300
+        $script:lyricsSnap = $snap
+        $snapTimer.Stop(); $snapTimer.Start()
     }
-    if ($on) {
-        foreach ($blk in $lp.Blocks) { if ($blk.Tag.Parts) { Set-PageLine $blk $blk.Tag.Parts -Fade } }
-        Settle-LyricsPage
-    } else {
-        $op = [System.Windows.UIElement]::OpacityProperty
-        foreach ($blk in $lp.Blocks) { $ex = $blk.Tag.Extras; if ($ex) { foreach ($x in $ex) { Animate60 $x $op ([double]$x.Opacity) 0.0 170 } } }
-        $pageReflowTimer.Stop(); $pageReflowTimer.Start()
-    }
+    Animate60 $lp.Fade $op 0.0 1.0 300
 }
-# Setelah yang dimatikan selesai memudar: susun ulang baris lalu geser halus
-$pageReflowTimer = New-Object System.Windows.Threading.DispatcherTimer
-$pageReflowTimer.Interval = Ms 180
-$pageReflowTimer.Add_Tick({
-    $pageReflowTimer.Stop()
-    $lp = $script:lyricsPage
-    if (-not $lp) { return }
-    foreach ($blk in $lp.Blocks) { if ($blk.Tag.Parts) { Set-PageLine $blk $blk.Tag.Parts } }
-    Settle-LyricsPage
+$snapTimer = New-Object System.Windows.Threading.DispatcherTimer
+$snapTimer.Interval = Ms 320
+$snapTimer.Add_Tick({
+    $snapTimer.Stop()
+    $sn = $script:lyricsSnap; $script:lyricsSnap = $null
+    if ($sn -and $sn.Parent) { $sn.Parent.Children.Remove($sn) }
 })
 
 # Tampilan tombol pojok halaman lirik mengikuti pengaturan (tanpa membangun ulang halaman)
@@ -3467,7 +3581,8 @@ function Show-List([switch]$Refresh) {
         }
     }
     # Titik halaman hanya kalau memang ada dua halaman
-    if ($pages.Count -gt 1) { [void]$listPanel.Children.Add((New-PageDots)) }
+    $script:pageDots = $null
+    if ($pages.Count -gt 1) { $script:pageDots = New-PageDots; [void]$listPanel.Children.Add($script:pageDots) }
     $listPanel.Measure((New-Object System.Windows.Size(($WIDE_W - 2), [double]::PositiveInfinity)))
     $h = [Math]::Min($MAX_ISLAND_H, [Math]::Max(56, [Math]::Ceiling($listPanel.DesiredSize.Height) + 2))
     Resize-Island $WIDE_W $h 24
@@ -4245,8 +4360,12 @@ $onToggle = {
     $script:settings.$name = -not $script:settings.$name
     Save-Settings
     switch ($name) {
-        'Lyrics' { if ($script:settings.Lyrics) { Request-Lyrics }; $script:lyricIdx = -2; Refresh-MediaView }
-        'Romaji' { $script:partsVer++; $script:lyricIdx = -2; if ($script:mode -eq 'list') { Show-List -Refresh } }
+        'Lyrics' {
+            if ($script:settings.Lyrics) { Request-Lyrics }
+            $script:lyricIdx = -2
+            if ($script:mode -eq 'list') { Update-PageDots } else { Refresh-MediaView }
+        }
+        'Romaji' { $script:lyricIdx = -2; if ($script:mode -eq 'list') { Show-List -Refresh } }
         'Furigana' { $script:lyricIdx = -2; if ($script:mode -eq 'list') { Show-List -Refresh } }
         'MicCam' { Check-Sensors }
         'Glow' {
