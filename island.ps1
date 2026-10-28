@@ -9,7 +9,7 @@ try { if ((Get-Item $logFile -ErrorAction Stop).Length -gt 512KB) { Remove-Item 
 function Log($msg) { try { Add-Content -Path $logFile -Value ("{0:yyyy-MM-dd HH:mm:ss} {1}" -f (Get-Date), $msg) } catch {} }
 
 # Versi ini dibandingkan dengan file VERSION di GitHub untuk cek update
-$APP_VERSION = '1.1.3'
+$APP_VERSION = '1.1.4'
 $REPO_URL = 'https://github.com/nkzwsn/mini-island-windows'
 
 # Pengaturan yang diingat antar-restart (diatur lewat menu klik kanan)
@@ -706,7 +706,9 @@ $listPanel = $views['ListView']
 
 $IDLE_W = 120; $IDLE_H = 30; $WIDE_W = 340; $NOTIF_H = 56; $ITEM_H = 48; $MAX_ITEMS = 4
 # Mini island selama lagu diputar: sekecil island diam supaya tidak menutupi tab/judul aplikasi
-$MINI_W = 120; $MINI_H = 24
+$MINI_W = 148; $MINI_H = 28
+# Lebar area judul berjalan di pil kecil (sisa setelah cover, equalizer, dan jarak)
+$MINI_TEXT_W = $MINI_W - 66
 
 function Brush($hex) { (New-Object System.Windows.Media.BrushConverter).ConvertFromString($hex) }
 function Ms($n) { [TimeSpan]::FromMilliseconds($n) }
@@ -1933,7 +1935,7 @@ function New-MiniContent {
     [void]$g.Children.Add($lyr)
     $script:miniLyricHost = $lyr
     $art = New-Object System.Windows.Controls.Border
-    $art.Width = 16; $art.Height = 16; $art.CornerRadius = New-Object System.Windows.CornerRadius(5)
+    $art.Width = 19; $art.Height = 19; $art.CornerRadius = New-Object System.Windows.CornerRadius(6)
     $art.HorizontalAlignment = 'Left'; $art.VerticalAlignment = 'Center'; $art.Margin = '5,0,0,0'
     if ($m.Art) {
         $ib = New-Object System.Windows.Media.ImageBrush($m.Art); $ib.Stretch = 'UniformToFill'
@@ -1949,7 +1951,7 @@ function New-MiniContent {
     $eq = New-Equalizer $m.Accent $true
     $eq.HorizontalAlignment = 'Right'; $eq.Margin = '0,0,9,0'
     [System.Windows.Controls.Grid]::SetColumn($eq, 2)
-    $eq.LayoutTransform = New-Object System.Windows.Media.ScaleTransform(0.85, 0.85)
+    $eq.LayoutTransform = New-Object System.Windows.Media.ScaleTransform(0.95, 0.95)
     [void]$g.Children.Add($eq)
     $g
 }
@@ -2003,19 +2005,19 @@ function New-MiniMarquee {
     $m = $script:media
     $txt = if ($m.Artist) { "$($m.Title)  " + [char]0x00B7 + "  $($m.Artist)" } else { "$($m.Title)" }
     $cv = New-Object System.Windows.Controls.Canvas
-    $cv.ClipToBounds = $true; $cv.Height = 13
+    $cv.ClipToBounds = $true; $cv.Height = 15
     $sp = New-Object System.Windows.Controls.StackPanel
     $sp.Orientation = 'Horizontal'
     foreach ($i in 0, 1) {
         $tb = New-Object System.Windows.Controls.TextBlock
-        $tb.Text = $txt; $tb.FontSize = 10; $tb.FontWeight = 'SemiBold'; $tb.Foreground = Brush '#D9FFFFFF'
+        $tb.Text = $txt; $tb.FontSize = 11; $tb.FontWeight = 'SemiBold'; $tb.Foreground = Brush '#D9FFFFFF'
         $tb.Margin = '0,0,28,0'
         [void]$sp.Children.Add($tb)
     }
     [void]$cv.Children.Add($sp)
     $sp.Measure((New-Object System.Windows.Size([double]::PositiveInfinity, [double]::PositiveInfinity)))
     $cycle = $sp.DesiredSize.Width / 2
-    [System.Windows.Controls.Canvas]::SetTop($sp, (13 - $sp.DesiredSize.Height) / 2)
+    [System.Windows.Controls.Canvas]::SetTop($sp, (15 - $sp.DesiredSize.Height) / 2)
     $tt = New-Object System.Windows.Media.TranslateTransform
     $sp.RenderTransform = $tt
     $a = New-Object System.Windows.Media.Animation.DoubleAnimation(0.0, (-$cycle), (New-Object System.Windows.Duration ([TimeSpan]::FromSeconds($cycle / $MARQUEE_SPEED))))
@@ -2023,9 +2025,9 @@ function New-MiniMarquee {
     [System.Windows.Media.Animation.Timeline]::SetDesiredFrameRate($a, $ANIM_FPS)
     $tt.BeginAnimation([System.Windows.Media.TranslateTransform]::XProperty, $a)
     Track-Anim $sp $tt ([System.Windows.Media.TranslateTransform]::XProperty)
-    # Tepi kiri/kanan memudar (lebar area teks di pil kecil sekitar 56 px)
+    # Tepi kiri/kanan memudar (selebar area teks di pil kecil)
     $mask = New-Object System.Windows.Media.LinearGradientBrush
-    $mask.MappingMode = 'Absolute'; $mask.StartPoint = '0,0'; $mask.EndPoint = '56,0'
+    $mask.MappingMode = 'Absolute'; $mask.StartPoint = '0,0'; $mask.EndPoint = "$MINI_TEXT_W,0"
     foreach ($st in @(@(0, 0.0), @(255, 0.16), @(255, 0.84), @(0, 1.0))) {
         $mask.GradientStops.Add((New-Object System.Windows.Media.GradientStop((Rgb 0 0 0 $st[0]), $st[1])))
     }
@@ -2034,7 +2036,7 @@ function New-MiniMarquee {
     $box = New-Object System.Windows.Controls.StackPanel
     $box.Name = 'marquee'; $box.VerticalAlignment = 'Center'
     [void]$box.Children.Add($cv)
-    $pb = New-WaveStrip 56 8 -Small
+    $pb = New-WaveStrip $MINI_TEXT_W 9 -Small
     $pb.Root.Margin = '1,0,1,0'
     [void]$box.Children.Add($pb.Root)
     $script:miniBar = $pb
@@ -3315,8 +3317,8 @@ function Format-Clock($ts) {
 function New-ClockMini {
     $g = New-Columns 'Auto', '*'
     $g.Margin = '9,0,11,0'
-    Add-Cell $g (New-Glyph $GLYPH_CLOCK 11 $CLOCK_COLOR) 0
-    $t = New-Label (Format-Clock (Get-ClockSpan)) 11 '#FFFFFF' 'SemiBold'
+    Add-Cell $g (New-Glyph $GLYPH_CLOCK 12 $CLOCK_COLOR) 0
+    $t = New-Label (Format-Clock (Get-ClockSpan)) 12 '#FFFFFF' 'SemiBold'
     $t.Foreground = New-Object System.Windows.Media.SolidColorBrush($CLOCK_COLOR)
     $t.HorizontalAlignment = 'Right'; $t.Typography.NumeralAlignment = 'Tabular'
     Add-Cell $g $t 1
