@@ -9,7 +9,7 @@ try { if ((Get-Item $logFile -ErrorAction Stop).Length -gt 512KB) { Remove-Item 
 function Log($msg) { try { Add-Content -Path $logFile -Value ("{0:yyyy-MM-dd HH:mm:ss} {1}" -f (Get-Date), $msg) } catch {} }
 
 # Versi ini dibandingkan dengan file VERSION di GitHub untuk cek update
-$APP_VERSION = '1.1.2'
+$APP_VERSION = '1.1.3'
 $REPO_URL = 'https://github.com/nkzwsn/mini-island-windows'
 
 # Pengaturan yang diingat antar-restart (diatur lewat menu klik kanan)
@@ -133,6 +133,13 @@ public static class IslandNative {
     }
 
     // top: paling atas (topmost). false: turun ke paling bawah, di belakang aplikasi fullscreen
+    // Tombol mouse mana pun sedang ditekan (di jendela mana saja)
+    [DllImport("user32.dll")] static extern short GetAsyncKeyState(int vk);
+    public static bool MouseDown() {
+        return (GetAsyncKeyState(1) & 0x8000) != 0 || (GetAsyncKeyState(2) & 0x8000) != 0 || (GetAsyncKeyState(4) & 0x8000) != 0;
+    }
+    public static IntPtr Foreground() { return GetForegroundWindow(); }
+
     public static void SetTop(IntPtr h, bool top) {
         SetWindowPos(h, new IntPtr(top ? -1 : 1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010 | 0x0200);
     }
@@ -3547,9 +3554,13 @@ function New-MI($header, $tag = $null, $onClick = $null, [switch]$Check, [bool]$
     $mi = New-Object System.Windows.Controls.MenuItem
     $mi.Header = $header; $mi.Tag = $tag
     if ($Check) { $mi.IsCheckable = $false; $mi.IsChecked = $Checked }
-    if ($Stay) { $mi.StaysOpenOnClick = $true }
     if ($Disabled) { $mi.IsEnabled = $false }
-    if ($onClick) { $mi.Add_Click($onClick) }
+    if ($onClick) {
+        # WPF menutup menu seketika setelah item diklik; menu ditutup sendiri supaya bisa memudar
+        $mi.StaysOpenOnClick = $true
+        $mi.Add_Click($onClick)
+        if (-not $Stay) { $mi.Add_Click({ Close-Menu }) }
+    }
     $mi
 }
 function Add-MI($parent, $item) { [void]$parent.Items.Add($item); $item }
@@ -3791,7 +3802,80 @@ $island.Add_MouseLeftButtonUp({
 # Menu klik kanan: di island yang terbuka maupun di garis penanda di atasnya (island diam / mini island)
 $menu = New-Object System.Windows.Controls.ContextMenu
 try { $menu.Resources = [Windows.Markup.XamlReader]::Parse($MENU_XAML) } catch { Log "menu style: $_" }
-$menu.Add_Opened({ $hoverTimer.Stop() })
+# Island tidak pernah jadi jendela aktif (supaya tidak mencuri fokus), sehingga WPF tidak tahu saat
+# pengguna mengklik di luar menu. Selama menu terbuka, klik di luar menu (dan submenunya) dipantau
+# sendiri; menu juga ditutup kalau pengguna pindah ke aplikasi lain.
+# Kotak menu yang sedang tampil: menu utama + submenu yang terbuka
+function Get-MenuBoxes {
+    $boxes = New-Object System.Collections.Generic.List[object]
+    $boxes.Add($menu)
+    $stack = New-Object System.Collections.Generic.Stack[object]
+    $stack.Push($menu)
+    while ($stack.Count) {
+        foreach ($it in $stack.Pop().Items) {
+            if ($it -isnot [System.Windows.Controls.MenuItem] -or -not $it.IsSubmenuOpen) { continue }
+            $pp = $it.Template.FindName('PART_Popup', $it)
+            if ($pp -and $pp.Child) { $boxes.Add($pp.Child) }
+            $stack.Push($it)
+        }
+    }
+    , $boxes
+}
+function Test-OverMenu {
+    $p = [IslandNative]::CursorPos()
+    foreach ($el in (Get-MenuBoxes)) {
+        try {
+            if (-not [System.Windows.PresentationSource]::FromVisual($el)) { continue }
+            $tl = $el.PointToScreen((New-Object System.Windows.Point(0, 0)))
+            $br = $el.PointToScreen((New-Object System.Windows.Point($el.ActualWidth, $el.ActualHeight)))
+            if ($p[0] -ge $tl.X -and $p[0] -le $br.X -and $p[1] -ge $tl.Y -and $p[1] -le $br.Y) { return $true }
+        } catch {}
+    }
+    $false
+}
+$menuWatch = New-Object System.Windows.Threading.DispatcherTimer
+$menuWatch.Interval = Ms 40
+$menuWatch.Add_Tick({
+    if (-not $menu.IsOpen) { $menuWatch.Stop(); return }
+    $down = [IslandNative]::MouseDown()
+    # Hanya tekanan baru (klik kanan yang membuka menu belum tentu sudah dilepas)
+    $press = $down -and -not $script:menuWasDown
+    $script:menuWasDown = $down
+    if (($press -and -not (Test-OverMenu)) -or [IslandNative]::Foreground() -ne $script:menuFg) { Close-Menu }
+})
+
+# Menu (dan submenunya) memudar sambil sedikit naik, baru ditutup
+$script:menuFading = @()
+$menuCloseTimer = New-Object System.Windows.Threading.DispatcherTimer
+$menuCloseTimer.Interval = Ms 220
+$menuCloseTimer.Add_Tick({ $menuCloseTimer.Stop(); $menu.IsOpen = $false })
+function Close-Menu {
+    if (-not $menu.IsOpen -or $menuCloseTimer.IsEnabled) { return }
+    $menuWatch.Stop()
+    $script:menuFading = (Get-MenuBoxes).ToArray()
+    foreach ($el in $script:menuFading) {
+        $tt = New-Object System.Windows.Media.TranslateTransform
+        $el.RenderTransform = $tt
+        Animate60 $el ([System.Windows.UIElement]::OpacityProperty) 1 0 210
+        Animate60 $tt ([System.Windows.Media.TranslateTransform]::YProperty) 0 -6 220
+    }
+    $menuCloseTimer.Start()
+}
+$menu.Add_Opened({
+    $hoverTimer.Stop()
+    $script:menuWasDown = $true
+    $script:menuFg = [IslandNative]::Foreground()
+    $menuWatch.Start()
+})
+$menu.Add_Closed({
+    $menuWatch.Stop(); $menuCloseTimer.Stop()
+    # Siap tampil normal lagi saat dibuka berikutnya
+    foreach ($el in $script:menuFading) {
+        $el.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $null); $el.Opacity = 1
+        $el.RenderTransform = [System.Windows.Media.Transform]::Identity
+    }
+    $script:menuFading = @()
+})
 Build-Menu
 foreach ($el in $island, $hotZone) {
     $el.ContextMenu = $menu
